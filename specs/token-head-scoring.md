@@ -1,72 +1,52 @@
-# Spec: 让 token head 参与推理打分（方案 B）
+# Spec: 把 token head 改造成主打分路径（需重新训练）
 
-## 背景
+## 现状与判断
 
-模型是 BERT 类 encoder + 两个 head：
-- sentence head：pooled representation → 2-way 分类（当前唯一的推理路径）
-- token head：逐 token 二分类，训练时以 `loss = CE_sentence + λ * BCE_token` 的形式存在
+模型是 encoder + sentence head（pooled → 分类）+ token head（逐 token 二分类，
+训练时作为辅助 loss）。token 级标签由已有的 span 标注生成，top-k 聚合已实现。
 
-问题：长上下文下召回显著下降。假设原因是 pooling 把注入片段（30–40 token）
-在长序列（数百 token）里稀释掉了；token head 已学到局部可分性，但推理时完全没用上。
+长上下文下召回明显下降。原因判断为 **pooling 稀释**：注入片段约 30–40 token，
+总长数百 token，sentence head 的 pooling 必然把它摊薄。旧方案里 token head 只进
+loss、不进推理，所以学到的局部信息没被用上。
 
-本任务：把 token head 接入推理打分，并评估它在长文本上是否优于 sentence head。
+**本任务是训练一个新版本**，不是做对比实验。旧方案已确认不可行。
 
-**不需要重新训练**，直接加载现有 checkpoint。
+## 目标
 
-## 要实现的内容
+推理时的序列分数由 **token 概率聚合**得到（top-k mean，沿用现有实现），
+而不是由 pooling 得到。训练目标要与这个推理方式对齐。
 
-### 1. token 聚合打分函数
+## 核心改动（按重要性）
 
-对每条样本，从 token head 的 logits 得到一个序列级分数：
+1. **句子级监督要作用在聚合后的分数上**，而不是只逐 token 算 BCE。
+   即：先 top-k 聚合成一个序列分数，再对这个分数算句子级 loss。
+   这是整个改动的关键——训练优化的目标和推理用的分数必须是同一个量。
+   旧方案里这两者是脱节的。
 
-```
-probs      = sigmoid(token_logits)              # [B, L]
-valid_mask = attention_mask & (offset_start != offset_end)   # 排除 [CLS]/[SEP]/padding
-k          = max(1, min(K, valid_mask.sum(dim=1)))           # 逐样本自适应
-score_tok  = 每条样本在 valid 位置上 top-k probs 的均值
-```
+2. **保留逐 token 的 dense 监督**。span 标注是强监督，别浪费。
+   最终 loss 大致是「聚合分数的句子级 loss」+「逐 token loss」两项，
+   权重需要调。
 
-- `K` 做成参数，默认 8；需要支持在 {1, 4, 8, 16, 32} 上扫。K=1 等价于 max。
-- **必须逐样本处理**，不同样本 valid 长度不同；不要在 padding 上取 top-k。
+3. **sentence head 的去留由你判断**。可以完全去掉、可以降权保留做辅助。
+   如果保留，推理时它不应该是主路径。
 
-### 2. ensemble 分数
+4. **token 级正负极不平衡**（正例约占 10% 甚至更低），需要处理
+   （pos_weight / focal / 其他），具体方式自行决定。
 
-```
-score_ens = w * p_sentence + (1 - w) * score_tok
-```
+## 需要你根据现有代码决定的事
 
-`w` 在 valid 集上扫 {0, 0.1, ..., 1.0}，只在 valid 上选，不碰 test。
+- 上面这些怎么接进现有的 model / loss / train loop 结构，尽量小改动、不重构。
+- 两项 loss 的权重、K 的取值、要不要在训练中途调度。
+- 是从现有 checkpoint 继续训还是重新初始化 head。
+- 聚合用 top-k mean 还是别的（log-sum-exp、noisy-OR 等），如果你认为有更合适的，
+  说明理由后可以换。
 
-### 3. 评估脚本
+先读代码，再决定方案，**动手前把打算怎么改说一遍**。
 
-新增一个脚本（不要改训练代码），输入：checkpoint、数据集、K、bucket 边界。
+## 注意
 
-对三种打分方式各算一遍指标：`sentence`（baseline）/ `token_topk` / `ensemble`。
-
-**按输入总长度分桶**，桶边界默认 `<64 / 64–128 / 128–256 / 256–512`，每桶分别报：
-
-| 指标 | 说明 |
-|---|---|
-| ROC-AUC | 主要看这个，与阈值无关 |
-| PR-AUC | 正类稀疏时更敏感 |
-| F1 / Precision / Recall | 阈值**只在 valid 上选**，固定后用于 test |
-| 样本数 | 每桶 n，桶太小的要标注出来 |
-
-输出一张 markdown 表 + 一个 CSV，保存到 `results/`。
-
-## 验收标准
-
-- 脚本可复现跑通，不改动任何训练代码、不重新训练。
-- 产出上面那张「3 种打分 × 4 个长度桶」的表。
-- 阈值和 `w` 的选择过程可见（记录在输出里），且明确只用了 valid 集。
-
-## 注意事项
-
-1. **mask 是最容易出错的地方**。特殊 token 的 `offset_mapping` 是 `(0,0)`，padding 也是。
-   如果没排干净，top-k 会挑到这些位置，分数完全失真。实现后先打印几条样本的
-   valid token 数和原文 token 数核对。
-2. 先看 AUC，不要先看 F1。阈值没重新调过，F1 会给出误导性的结论。
-3. token head 是当初以辅助 loss 训出来的，可能校准很差 —— 这不影响 AUC，
-   也正是要单独扫阈值的原因。
-4. 如果 `token_topk` 在长桶上的 AUC 仍随长度衰减，如实报告，不要调参去凑。
-   那个结果说明问题不在聚合方式，而在 encoder 表征，属于另一个方向。
+- 聚合时必须排除特殊 token 和 padding（`offset_mapping == (0,0)` 的位置）。
+  漏掉这步分数会完全失真，实现后先抽样核对 valid token 数。
+- 评估要**按输入长度分桶**报指标，重点看长桶。整体平均会把问题盖掉。
+- 先看 AUC / PR-AUC，阈值单独在 valid 上调，别用默认 0.5 下的 F1 判断好坏。
+- 如果改完长桶指标仍不动，如实报告，不要调参去凑。
