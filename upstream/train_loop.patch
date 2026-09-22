@@ -38,3 +38,34 @@ model_accepts_loss_kwargs = False -- precisely the flag that self-check exists t
 validate. At effective_batch_size 64 (micro 32, accumulation 2) a double division
 would halve the learning rate for those trials only, silently. Worth running that
 check once against SegmentTrainer before trusting a batch-size comparison.
+
+4. Stratified micro-batches (optional; off unless both are set).
+
+   SegmentTrainer takes `malicious_per_batch`; the model reads
+   `config.stratified_prior_ratio`. Set them together or neither: the sampler
+   without the weights trains at a different prior than the one calibration
+   assumes, and the weights without the sampler are a no-op.
+
+   In _resolve_segment_hp, alongside the micro-batch resolution:
+
++        hp["stratified_prior_ratio"] = hp["benign_to_malicious_ratio"]
+
+   and in make_segment_model's SEGMENT_HP loop the key is carried onto the
+   config automatically once it is listed there, or set it explicitly:
+
++    config.stratified_prior_ratio = hp.get("stratified_prior_ratio")
+
+   At both trainer_class(...) call sites (benign_exposure_trainable and
+   train_final_model):
+
++            malicious_per_batch=int(hp.get("malicious_per_batch", 0)),
+
+   `malicious_per_batch` belongs in the config's fixed block rather than the
+   search space; 4 out of a 32-token micro-batch leaves the positive weight at
+   0.258 and drives the empty-batch rate to zero. Raising it further mostly
+   shortens the epoch.
+
+   An epoch becomes one pass over the NEGATIVE pool, so it grows by roughly
+   batch_size / (batch_size - malicious_per_batch) -- about 10% at 32/4. Both
+   classes are rescaled by that same factor, which is why the objective is
+   unchanged; num_train_epochs means slightly more steps than before.

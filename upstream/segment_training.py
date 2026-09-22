@@ -1,7 +1,9 @@
 """Small Trainer/HPO integration for the token-only maximum-subarray model."""
 
 import numpy as np
+import torch
 from sklearn.metrics import average_precision_score
+from torch.utils.data import Sampler
 from transformers import EvalPrediction
 
 from asl_loss import ASLTrainer
@@ -13,12 +15,78 @@ from asl_loss import ASLTrainer
 LENGTH_BUCKETS = ((0, 128, "short"), (128, 256, "medium"), (256, 513, "long"))
 
 
+class StratifiedOrder(Sampler):
+    """Index order whose every consecutive `batch_size` block holds `per_batch` positives.
+
+    A batch sampler would be the direct way to say this, but it requires
+    replacing get_train_dataloader and therefore tracking its signature across
+    Trainer versions. A plain Sampler is enough: the DataLoader slices this
+    order into consecutive blocks, so laying the indices out in the right order
+    composes the batches.
+
+    An epoch is one pass over the NEGATIVE pool. The positive pool is 30x
+    smaller, so it is reshuffled and cycled; combined with the importance
+    weights on the sequence loss, the total positive gradient per epoch matches
+    what unstratified sampling delivers.
+    """
+
+    def __init__(self, labels, batch_size, per_batch, seed=0):
+        if not 0 < per_batch < batch_size:
+            raise ValueError("Stratified positives per batch must be inside the batch")
+        labels = np.asarray(labels)
+        self.positives = np.flatnonzero(labels == 1)
+        self.negatives = np.flatnonzero(labels != 1)
+        if not len(self.positives) or not len(self.negatives):
+            raise ValueError("Stratified sampling needs both classes present")
+        self.batch_size, self.per_batch, self.seed, self.epoch = batch_size, per_batch, seed, 0
+
+    def set_epoch(self, epoch):
+        self.epoch = int(epoch)
+
+    def __len__(self):
+        per_batch_negatives = self.batch_size - self.per_batch
+        return (len(self.negatives) // per_batch_negatives) * self.batch_size
+
+    def __iter__(self):
+        rng = np.random.default_rng([self.seed, self.epoch])
+        negatives = rng.permutation(self.negatives)
+        positives, taken = rng.permutation(self.positives), 0
+        per_batch_negatives = self.batch_size - self.per_batch
+        order = []
+        for start in range(0, len(negatives) - per_batch_negatives + 1, per_batch_negatives):
+            if taken + self.per_batch > len(positives):
+                positives, taken = rng.permutation(self.positives), 0
+            order.extend(positives[taken:taken + self.per_batch].tolist())
+            taken += self.per_batch
+            order.extend(negatives[start:start + per_batch_negatives].tolist())
+        return iter(order)
+
+
 class SegmentTrainer(ASLTrainer):
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, malicious_per_batch=0, **kwargs):
         super().__init__(*args, **kwargs)
         # Our losses are micro-batch means, not sums normalized by the number
         # of items across the accumulated batch. Ask Trainer to divide once.
         self.model_accepts_loss_kwargs = False
+        self.malicious_per_batch = int(malicious_per_batch)
+
+    def _get_train_sampler(self, *args, **kwargs):
+        """Guarantee positives in every micro-batch without enlarging it.
+
+        The loss is a micro-batch mean, and the micro-batch is capped by memory,
+        not by the sampled effective batch. Enlarging it is the expensive way to
+        stop drawing empty batches; ordering the same indices differently costs
+        nothing. The model restores the original prior through
+        config.stratified_prior_ratio, so the objective is unchanged.
+        """
+        if self.malicious_per_batch <= 0:
+            return super()._get_train_sampler(*args, **kwargs)
+        dataset = self.train_dataset
+        column = next((k for k in ("label", "labels") if k in dataset.column_names), None)
+        if column is None:
+            raise ValueError(f"Stratified sampling needs a label column: {dataset.column_names}")
+        return StratifiedOrder(dataset[column], self._train_batch_size,
+                               self.malicious_per_batch, self.args.seed)
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         # The model computes both objectives from its deployed segment score.

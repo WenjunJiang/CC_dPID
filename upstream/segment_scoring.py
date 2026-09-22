@@ -67,8 +67,38 @@ def maximum_subarray(logits, valid_mask, tau):
     return score, start, end + 1
 
 
-def stable_sequence_asl(margin, labels, gamma_pos=1.0, gamma_neg=2.0, clip=0.01):
-    """ASL without a hard logit clamp or a saturated sigmoid-to-log round trip."""
+def prior_weights(labels, prior_ratio):
+    """Restore the `prior_ratio` prior from a batch that was stratified away from it.
+
+    A stratified batch over-represents the minority class deliberately, to remove
+    the steps where it is absent altogether; at 30:1 with a micro-batch of 32,
+    35% of steps carry no malicious sample and 71% carry no long-context one.
+    Reweighting keeps the objective identical in expectation, so stratification
+    buys lower gradient variance rather than a different problem.
+
+    The weights are one everywhere when the batch already sits at the prior, and
+    an absent class cannot contribute regardless of the weight assigned to it.
+    """
+    y = labels.float().reshape(-1)
+    total = y.numel()
+    positives = y.sum()
+    share = 1.0 / (1.0 + float(prior_ratio))
+    return torch.where(
+        y > 0,
+        share * total / positives.clamp(min=1.0),
+        (1.0 - share) * total / (total - positives).clamp(min=1.0),
+    )
+
+
+def stable_sequence_asl(margin, labels, gamma_pos=1.0, gamma_neg=2.0, clip=0.01,
+                        prior_ratio=None):
+    """ASL without a hard logit clamp or a saturated sigmoid-to-log round trip.
+
+    `prior_ratio` is the benign:malicious ratio the batch would have had without
+    stratification; leaving it None keeps the plain mean. The region term needs
+    no such correction: each of its halves already averages over the samples that
+    own that region, so it does not move with the class balance.
+    """
     z = margin.float()
     y = labels.float().reshape(-1)
     log_p, log_not_p = F.logsigmoid(z), F.logsigmoid(-z)
@@ -80,7 +110,10 @@ def stable_sequence_asl(margin, labels, gamma_pos=1.0, gamma_neg=2.0, clip=0.01)
     else:
         shifted = log_not_p
     negative = -shifted * torch.exp(gamma_neg * log_p)
-    return (y * positive + (1 - y) * negative).mean()
+    per_sample = y * positive + (1 - y) * negative
+    if prior_ratio is None:
+        return per_sample.mean()
+    return (prior_weights(y, prior_ratio) * per_sample).mean()
 
 
 def _pooled_top(token_logits, mask, count):
@@ -191,6 +224,9 @@ class SegmentForSequenceClassification(ModernBertPreTrainedModel):
             raise ValueError("positive_coverage must lie in (0, 1]")
         if hasattr(config, "leak_loss_weight") and float(config.leak_loss_weight) < 0:
             raise ValueError("leak_loss_weight must not be negative")
+        prior = getattr(config, "stratified_prior_ratio", None)
+        if prior is not None and float(prior) <= 0:
+            raise ValueError("stratified_prior_ratio must be positive")
         self.num_labels = 2
         self.model = encoder if encoder is not None else ModernBertModel(config)
         self.token_evidence_head = SegmentTokenHead(config.hidden_size, config.token_head_dropout)
@@ -220,8 +256,10 @@ class SegmentForSequenceClassification(ModernBertPreTrainedModel):
         logits = torch.stack((torch.zeros_like(scores), scores), dim=-1)
         loss = None
         if labels is not None:
-            loss = stable_sequence_asl(scores, labels, self.config.gamma_pos,
-                                       self.config.gamma_neg, self.config.asl_clip)
+            loss = stable_sequence_asl(
+                scores, labels, self.config.gamma_pos, self.config.gamma_neg,
+                self.config.asl_clip,
+                getattr(self.config, "stratified_prior_ratio", None) if self.training else None)
             if self.training and self.config.region_loss_weight > 0:
                 if malicious_mask is None or benign_mask is None:
                     raise ValueError("Segment training requires both region masks")

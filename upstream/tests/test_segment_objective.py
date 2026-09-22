@@ -12,6 +12,7 @@ the failure possible, so it cannot come back silently.
 
 import unittest
 
+import numpy as np
 import torch
 from torch.nn import functional as F
 
@@ -173,3 +174,84 @@ class SequenceTermSaturates(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StratifiedBatchesPreserveTheObjective(unittest.TestCase):
+    """Positives in every micro-batch, at the same expected loss.
+
+    The micro-batch is capped by memory rather than by the sampled effective
+    batch, so at 30:1 roughly a third of optimizer steps saw no malicious sample
+    at all and about 71% saw no long-context one. Reordering the same indices
+    fixes that for free; the importance weights keep it from also changing the
+    problem being solved.
+    """
+
+    RATIO, BATCH, PER_BATCH = 30, 32, 4
+
+    def setUp(self):
+        from segment_training import StratifiedOrder
+        self.labels = np.array([1] * 300 + [0] * 9000)
+        self.sampler = StratifiedOrder(self.labels, self.BATCH, self.PER_BATCH, seed=42)
+
+    def _batches(self):
+        order = list(iter(self.sampler))
+        return [order[i:i + self.BATCH]
+                for i in range(0, len(order) - self.BATCH + 1, self.BATCH)]
+
+    def test_every_batch_holds_the_requested_positives(self):
+        counts = {sum(self.labels[i] == 1 for i in batch) for batch in self._batches()}
+        self.assertEqual(counts, {self.PER_BATCH})
+
+    def test_negatives_are_not_repeated_within_an_epoch(self):
+        drawn = [i for batch in self._batches() for i in batch if self.labels[i] == 0]
+        self.assertEqual(len(drawn), len(set(drawn)))
+
+    def test_both_classes_are_rescaled_by_the_same_factor(self):
+        """The epoch grows ~10%; what must not change is the ratio between classes.
+
+        Exposure times weight is the total gradient each class contributes per
+        epoch. Stratified batches spend 28 negative slots where an unstratified
+        batch of 32 spends about 31, so an epoch covers more steps -- equally for
+        both classes, which is why the objective is untouched.
+        """
+        batches = self._batches()
+        share = 1.0 / (1.0 + self.RATIO)
+        weight_positive = share / (self.PER_BATCH / self.BATCH)
+        weight_negative = (1 - share) / (1 - self.PER_BATCH / self.BATCH)
+        positive = len(batches) * self.PER_BATCH / (self.labels == 1).sum() * weight_positive
+        negative = len(batches) * (self.BATCH - self.PER_BATCH) / (self.labels == 0).sum() * weight_negative
+        self.assertAlmostEqual(positive, negative, places=6)
+
+    def test_epochs_differ(self):
+        first = list(iter(self.sampler))
+        self.sampler.set_epoch(1)
+        self.assertNotEqual(first, list(iter(self.sampler)))
+
+
+class PriorWeightsRestoreTheUnstratifiedLoss(unittest.TestCase):
+    RATIO = 30
+
+    def _loss(self, margins, labels, prior_ratio=None):
+        return float(stable_sequence_asl(
+            torch.tensor(margins), torch.tensor(labels), prior_ratio=prior_ratio))
+
+    def test_a_batch_already_at_the_prior_is_left_alone(self):
+        labels = [1.0] + [0.0] * self.RATIO
+        margins = [3.0] + [-3.0] * self.RATIO
+        self.assertAlmostEqual(self._loss(margins, labels),
+                               self._loss(margins, labels, self.RATIO), places=6)
+
+    def test_a_stratified_batch_matches_the_population_loss(self):
+        """Same per-class losses, different batch composition, same weighted mean."""
+        def weighted(n_positive, n_negative):
+            labels = [1.0] * n_positive + [0.0] * n_negative
+            margins = [3.0] * n_positive + [-3.0] * n_negative
+            return self._loss(margins, labels, self.RATIO)
+
+        self.assertAlmostEqual(weighted(4, 28), weighted(1, 30), places=6)
+        self.assertAlmostEqual(weighted(4, 28), weighted(16, 16), places=6)
+
+    def test_an_absent_class_cannot_contribute(self):
+        from segment_scoring import prior_weights
+        weights = prior_weights(torch.zeros(8), self.RATIO)
+        self.assertTrue(torch.isfinite(weights).all())

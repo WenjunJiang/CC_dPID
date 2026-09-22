@@ -87,4 +87,12 @@
 | `configs/training/peft_benign_exposure_mmbert2_email_segment.yaml` | 搜索空间、选择指标、weights |
 | `train_benign_exposure_mmbert2_dilute_email.py` | 三处小改，转发验证比例给 D |
 | `tests/test_segment_objective.py` | 新增，把排序翻转写成验收判据 |
-| `email_augmentation/`（**未拿到**） | E 需要这个文件才能改 |
+| `email_augmentation.py` | **无需改动**（见下） |
+
+`email_augmentation.py` 不用动：form 是 `compose()` 里按 label 权重逐样本抽的，
+config 已把 email 形式从 1/3 提到 0.6；再保证每个 micro-batch 有 4 条 malicious，
+"该批无长样本恶意例"的概率就从 71% 降到 0.4^4 = 2.6%。
+
+E 落在 `SegmentTrainer._get_train_sampler`（`StratifiedOrder`，重排索引不改 batch 大小）
+和 `stable_sequence_asl` 的 `prior_ratio`（恢复原先验）。
+修好归一化之后 region 项已与类别比例无关，所以只有 ASL 需要重加权。
