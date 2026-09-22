@@ -102,3 +102,27 @@ since the score is a sum over the selected segment. check_score_resolution
 already warns when calibrated probabilities lose float32 resolution, and the
 Platt slope adapts, but that warning is now more likely to fire and should not
 be ignored if it does.
+
+Verified against asl_loss.py:
+  - ASLTrainer overrides get_train_dataloader only to swap the collator and then
+    defers to Trainer, which is what calls _get_train_sampler. The override in
+    SegmentTrainer is reached and nothing else competes for it.
+  - SegmentTrainer.compute_loss never touches self.loss_fn, so ASL's [-50, 50]
+    logit clamp does not apply to the segment score -- which is what lets the
+    margin grow past six once the window widens.
+
+Two things in that file worth a decision, neither changed here:
+
+  - ASLTrainer.__init__ still builds an AsymmetricLossBinary from the gamma_pos /
+    gamma_neg / asl_clip kwargs, and SegmentTrainer inherits it without ever
+    calling it: the values that matter live on the model config, set separately
+    by make_segment_model. Both read the same hp dict today, so they agree, but
+    changing one of the two in isolation would silently do nothing.
+
+  - maximum_subarray runs `torch.isfinite(values).all()` and
+    `valid.any(dim=1).all()` on every forward. On CUDA each is a device sync,
+    and this file documents avoiding exactly that: AsymmetricLossBinary checks
+    finiteness every 50 steps instead, because a micro-step carries ~76ms of
+    fixed overhead and a sync stops the CPU running ahead. These are input
+    guards rather than loss guards, so weakening them is a judgement call rather
+    than a cleanup; worth measuring before deciding.

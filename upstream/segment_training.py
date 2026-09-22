@@ -92,7 +92,12 @@ class SegmentTrainer(ASLTrainer):
         column = next((k for k in ("label", "labels") if k in dataset.column_names), None)
         if column is None:
             raise ValueError(f"Stratified sampling needs a label column: {dataset.column_names}")
-        return StratifiedOrder(dataset[column], self._train_batch_size,
+        # The order has to be sliced by whatever batch size the DataLoader uses,
+        # which is Trainer's _train_batch_size (per-device times device count).
+        # One GPU per trial makes the two equal; the fallback covers the Trainer
+        # versions that set the attribute in train() rather than __init__.
+        batch_size = getattr(self, "_train_batch_size", None) or self.args.per_device_train_batch_size
+        return StratifiedOrder(dataset[column], int(batch_size),
                                self.malicious_per_batch, self.args.seed)
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
