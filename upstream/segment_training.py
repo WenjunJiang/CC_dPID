@@ -7,12 +7,19 @@ from torch.utils.data import Sampler
 from transformers import EvalPrediction
 
 from asl_loss import ASLTrainer
+from raytune_benchmark import deployment_sample_weight
 
 # Validation runs at one benign:malicious ratio and deployment at another, so a
 # metric read straight off the validation set answers a question nobody asked.
 # Reweighting the negatives by the ratio of the two prevalences turns it back
 # into the deployment question without rebuilding the set.
 LENGTH_BUCKETS = ((0, 128, "short"), (128, 256, "medium"), (256, 513, "long"))
+
+
+# A trial that dies reports _FAILED_REPORT, which lists the sentence metrics
+# only. Ray then has no value for the segment run's selection metric, and a
+# search whose trials all fail has nothing to rank rather than a floor of zero.
+FAILED_SEGMENT_REPORT = {"val_selection_pr_auc": 0.0, "val_mean_segment_length": 0.0}
 
 
 class StratifiedOrder(Sampler):
@@ -94,17 +101,6 @@ class SegmentTrainer(ASLTrainer):
         return (outputs.loss, outputs) if return_outputs else outputs.loss
 
 
-def _deployment_weights(labels, validation_ratio, deployment_ratio):
-    """Negatives stand in for `deployment_ratio / validation_ratio` of themselves.
-
-    Computed here rather than through the calibration helper because this is the
-    whole of it, and a metric that silently reweights the wrong way would look
-    like a better model rather than like a bug.
-    """
-    scale = float(deployment_ratio) / float(validation_ratio)
-    return np.where(np.asarray(labels) == 1, 1.0, scale)
-
-
 def segment_metrics(base_metrics, validation_ratio=50, deployment_ratio=500):
     """Report per-length behaviour and a selection score that cannot saturate.
 
@@ -139,7 +135,7 @@ def segment_metrics(base_metrics, validation_ratio=50, deployment_ratio=500):
             if positives.any() and negatives.any():
                 score = float(average_precision_score(
                     labels[selected], margin[selected],
-                    sample_weight=_deployment_weights(
+                    sample_weight=deployment_sample_weight(
                         labels[selected], validation_ratio, deployment_ratio),
                 ))
                 result[f"{name}_pr_auc"] = score

@@ -69,3 +69,36 @@ check once against SegmentTrainer before trusting a batch-size comparison.
    batch_size / (batch_size - malicious_per_batch) -- about 10% at 32/4. Both
    classes are rescaled by that same factor, which is why the objective is
    unchanged; num_train_epochs means slightly more steps than before.
+
+5. Failed trials must report the new selection metric.
+
+   _FAILED_REPORT in raytune_benchmark.py lists the sentence metrics only, so a
+   segment trial that dies reports nothing for val_selection_pr_auc. Ray has no
+   value to rank it by, and a search where every trial fails has nothing to sort
+   rather than a floor of zero. At both _report_to_tune failure sites inside
+   benign_exposure_trainable:
+
+-        _report_to_tune({**_FAILED_REPORT, "error": str(exc)})
++        failed = dict(_FAILED_REPORT)
++        if _segment_enabled(hp):
++            from segment_training import FAILED_SEGMENT_REPORT
++            failed.update(FAILED_SEGMENT_REPORT)
++        _report_to_tune({**failed, "error": str(exc)})
+
+   (The cuda_oom site takes the same change.) raytune_benchmark.py itself is
+   left alone: it is shared with the sentence-model scripts.
+
+Verified against raytune_benchmark.py rather than assumed:
+  - _metric_mode maximizes anything outside {"val_loss"}, so val_selection_pr_auc
+    is maximized without further registration.
+  - ReportToRay maps eval_* to val_*, so compute_metrics returning
+    "selection_pr_auc" arrives as "val_selection_pr_auc".
+  - deployment_sample_weight(labels, view_ratio, deploy_ratio) reweights the
+    negatives by deploy_ratio / view_ratio, which is what the bucket PR-AUC
+    needs; segment_training now calls it instead of recomputing it.
+
+One thing to watch after retraining: wider windows mean larger raw margins,
+since the score is a sum over the selected segment. check_score_resolution
+already warns when calibrated probabilities lose float32 resolution, and the
+Platt slope adapts, but that warning is now more likely to fire and should not
+be ignored if it does.
