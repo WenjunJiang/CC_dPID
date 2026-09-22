@@ -306,6 +306,10 @@ def make_segment_model(base_model, tokenizer, hp):
         setattr(config, name, hp[name])
     for name, default in (("gamma_pos", 1.0), ("gamma_neg", 2.0), ("asl_clip", 0.01)):
         setattr(config, name, float(hp.get(name, default)))
+    # Only present when the training loop stratifies the micro-batch; absent it,
+    # the sequence loss stays a plain mean and nothing is reweighted.
+    if hp.get("stratified_prior_ratio") is not None:
+        config.stratified_prior_ratio = float(hp["stratified_prior_ratio"])
     return SegmentForSequenceClassification(config, encoder=base_model.model)
 
 

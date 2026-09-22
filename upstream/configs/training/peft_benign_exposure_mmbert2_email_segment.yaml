@@ -46,6 +46,12 @@ training:
     weight_decay: {type: choice, values: [0.01]}
     warmup_ratio: {type: choice, values: [0.1]}
     benign_to_malicious_ratio: {type: choice, values: [30]}
+    # Positives per micro-batch. 0 leaves the sampler off; with it set, the
+    # model also needs stratified_prior_ratio, which the training loop derives
+    # from benign_to_malicious_ratio. Four out of 32 puts the positive weight at
+    # 0.258 and the empty-batch rate at zero; larger values mostly shorten the
+    # epoch, since an epoch is one pass over the negative pool.
+    malicious_per_batch: {type: choice, values: [4]}
 peft:
   extra_modules_to_save: [token_evidence_head]
   save_merged: false
