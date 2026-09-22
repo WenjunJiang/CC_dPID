@@ -340,6 +340,8 @@ def main():
                 results["runs"].append(
                     {"phase": "test", "agg": agg, "tau": tau, "seed": seed,
                      "secs": dt, "buckets": rep, "buckets_split": rep2})
+                with open(a.out, "w") as f:      # checkpoint each run
+                    json.dump(results, f, indent=2)
                 prs = " ".join(f"{rep[b]['pr_auc']:.3f}" for b in buckets)
                 pr2 = " ".join(f"{rep2[b]['pr_auc']:.3f}" for b in buckets)
                 print(f"  {agg:<12} seed{seed} {dt:5.1f}s  PR-AUC: {prs}   "
