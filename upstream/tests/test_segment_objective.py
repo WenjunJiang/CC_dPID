@@ -15,6 +15,7 @@ import unittest
 import numpy as np
 import torch
 from torch.nn import functional as F
+from torch.nn import functional as F
 
 from segment_scoring import (leak_loss_per_sample, region_losses, stable_sequence_asl,
                              _region_half)
@@ -255,3 +256,61 @@ class PriorWeightsRestoreTheUnstratifiedLoss(unittest.TestCase):
         from segment_scoring import prior_weights
         weights = prior_weights(torch.zeros(8), self.RATIO)
         self.assertTrue(torch.isfinite(weights).all())
+
+
+class MatchesTheLegacyRegionNormalization(unittest.TestCase):
+    """The per-owner mean is not a new idea; region_supervision.py already did it.
+
+    That file selects `token_logits[has_region]` before its BCE, so each region's
+    mean runs over the samples that own it. The segment rewrite replaced that
+    with a per-sample combined term averaged over the whole batch, which is where
+    the positive half lost a factor of the class ratio. This pins the two back
+    together so the regression cannot repeat.
+    """
+
+    def _legacy_half(self, token_logits, mask, k, positive):
+        """region_supervision.masked_topk_mean + its BCE, transcribed."""
+        mask = mask.bool()
+        lengths = mask.sum(dim=-1)
+        owns = lengths > 0
+        if not owns.any():
+            return None
+        logits, sub_mask, sub_lengths = token_logits[owns], mask[owns], lengths[owns]
+        width = min(int(k), logits.shape[1])
+        top = logits.masked_fill(~sub_mask, torch.finfo(logits.dtype).min).topk(width, dim=-1).values
+        effective = sub_lengths.clamp(max=width)
+        keep = torch.arange(width)[None, :] < effective[:, None]
+        pooled = top.masked_fill(~keep, 0.0).sum(dim=-1) / effective.to(logits.dtype)
+        target = torch.ones_like(pooled) if positive else torch.zeros_like(pooled)
+        return float(F.binary_cross_entropy_with_logits(pooled, target))
+
+    def test_each_half_matches_the_legacy_computation(self):
+        torch.manual_seed(0)
+        logits = torch.randn(31, 40)
+        malicious = torch.zeros_like(logits, dtype=torch.bool)
+        malicious[0, 5:25] = True                       # one malicious row in 31
+        benign = ~malicious
+        # coverage chosen so ceil(coverage * 20) == 3, the legacy constant k
+        positive, owns_positive, negative, owns_negative = region_losses(
+            logits, malicious, benign, 3 / 20, 8)
+        self.assertAlmostEqual(float(_region_half(positive, owns_positive)),
+                               self._legacy_half(logits, malicious, 3, True), places=5)
+        self.assertAlmostEqual(float(_region_half(negative, owns_negative)),
+                               self._legacy_half(logits, benign, 8, False), places=5)
+
+    def test_a_missing_half_is_dropped_rather_than_redistributed(self):
+        """Where the two deliberately differ, and why.
+
+        The legacy code stacks only the terms that exist and means them, so a
+        region absent from the whole batch hands its weight to the other one.
+        The segment design states the opposite -- a missing region contributes
+        zero without redistributing its half -- and that is what is kept here.
+        """
+        logits = torch.randn(4, 12)
+        malicious = torch.ones_like(logits, dtype=torch.bool)   # bare payloads
+        positive, owns_positive, negative, owns_negative = region_losses(
+            logits, malicious, torch.zeros_like(malicious), 0.5, 8)
+        combined = (0.5 * _region_half(positive, owns_positive)
+                    + 0.5 * _region_half(negative, owns_negative))
+        self.assertAlmostEqual(float(combined),
+                               0.5 * self._legacy_half(logits, malicious, 6, True), places=5)
