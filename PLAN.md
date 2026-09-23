@@ -88,15 +88,19 @@
 从 2 个 token 的 ~50% 降到 17 个的 ~6%。但 `all_upper`、同义词这类
 **全局**扰动改变了每个 token 的身份，宽度完全帮不上，仍需增强。
 
-## 文件
+## 文件（全部在 `dPID/`，即你打包的代码树上直接修改）
 
 | 文件 | 改动 |
 |---|---|
-| `segment_scoring.py` | A、B、C |
-| `segment_training.py` | D |
-| `configs/training/peft_benign_exposure_mmbert2_email_segment.yaml` | 搜索空间、选择指标、weights |
-| `train_benign_exposure_mmbert2_dilute_email.py` | 三处小改，转发验证比例给 D |
-| `tests/test_segment_objective.py` | 新增，把排序翻转写成验收判据 |
+| `segment_scoring.py` | A、B、C，以及 E 的先验重加权 |
+| `segment_training.py` | D、E（`StratifiedOrder`）、恶意样本窗口长度指标 |
+| `configs/training/peft_benign_exposure_mmbert2_email_segment.yaml` | 搜索空间、选择指标、weights、output_dir |
+| `train_benign_exposure_mmbert2_dilute_email.py` | 转发验证比例、`stratified_prior_ratio`、`malicious_per_batch`、失败 trial 上报 |
+| `interim_segment_training.py` | 必需超参改为 `positive_coverage`/`leak_loss_weight`；按 `hpo.metric` 选（原来写死 `val_f1`） |
+| `email_augmentation/SEGMENT_README.md` | 同步目标函数、HPO 范围、输出目录 |
+| `tests/test_segment_objective.py` | 目标函数单元测试（21 个） |
+| `tests/test_segment_integration.py` | 真实栈端到端（9 个） |
+| `tests/ab_segment_objective.py` | 旧/新目标函数 A/B |
 | `email_augmentation.py` | **无需改动**（见下） |
 
 `email_augmentation.py` 不用动：form 是 `compose()` 里按 label 权重逐样本抽的，

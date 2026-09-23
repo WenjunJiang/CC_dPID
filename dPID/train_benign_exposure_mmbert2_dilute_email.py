@@ -131,14 +131,31 @@ def _resolve_segment_hp(hp, perf_cfg):
             raise ValueError("Effective batch must be divisible by the micro-batch size")
         hp.update(per_device_train_batch_size=micro,
                   gradient_accumulation_steps=effective // micro, classifier_dropout=0.0)
+        # The model undoes the stratified batch composition with this; set it
+        # whenever malicious_per_batch is set, and neither otherwise.
+        if int(hp.get("malicious_per_batch", 0)) > 0:
+            hp["stratified_prior_ratio"] = float(hp["benign_to_malicious_ratio"])
     return hp
 
 
-def _training_components(hp):
+def _training_components(hp, validation_ratio=50):
     if _segment_enabled(hp):
         from segment_training import SegmentTrainer, segment_metrics
-        return SegmentTrainer, segment_metrics(compute_metrics_fn())
+        return SegmentTrainer, segment_metrics(compute_metrics_fn(), validation_ratio)
     return ASLTrainer, compute_metrics_fn()
+
+
+def _failed_report(hp):
+    """_FAILED_REPORT lists the sentence metrics only.
+
+    A segment run selects on val_selection_pr_auc, so without this a trial that
+    dies reports no value for the metric it is ranked by.
+    """
+    report = dict(_FAILED_REPORT)
+    if _segment_enabled(hp):
+        from segment_training import FAILED_SEGMENT_REPORT
+        report.update(FAILED_SEGMENT_REPORT)
+    return report
 
 
 def _training_batch(hp, perf_cfg):
@@ -863,7 +880,7 @@ def benign_exposure_trainable(
     except ModelLoadError as exc:
         print(f"\n{_BORDER}\n  ✗ LOAD FAILED  (trial {trial_id})  {model_id}"
               f"\n  {exc}\n{_BORDER}\n")
-        _report_to_tune({**_FAILED_REPORT, "error": str(exc)})
+        _report_to_tune({**_failed_report(hp), "error": str(exc)})
         return
     
     # QAT first, then LoRA (see _prepare_model)
@@ -877,7 +894,7 @@ def benign_exposure_trainable(
     except Exception as exc:
         print(f"\n{_BORDER}\n  ✗ MODEL PREP FAILED  (trial {trial_id})  {model_id}"
               f"\n  {exc}\n{_BORDER}\n")
-        _report_to_tune({**_FAILED_REPORT, "error": str(exc)})
+        _report_to_tune({**_failed_report(hp), "error": str(exc)})
         return
     
     email_train_collator = make_email_collator(
@@ -1063,7 +1080,8 @@ def benign_exposure_trainable(
                 remove_unused_columns=False,  # Keep 'text' column for TemplateDilutionCollator
             )
             
-            trainer_class, metrics_function = _training_components(hp)
+            trainer_class, metrics_function = _training_components(
+                hp, benign_per_malicious_val)
             trainer_class(
                 model=model,
                 args=train_args,
@@ -1079,16 +1097,18 @@ def benign_exposure_trainable(
                 gamma_neg=float(hp.get("gamma_neg", 0.0)),
                 asl_clip=float(hp.get("asl_clip", 0.0)),
                 check_finite_every=int(_perf_flag(perf_cfg, "check_finite_every", 50)),
+                **({"malicious_per_batch": int(hp.get("malicious_per_batch", 0))}
+                   if _segment_enabled(hp) else {}),
             ).train()
     
     except torch.cuda.OutOfMemoryError:
         print(f"\n{_BORDER}\n  ✗ CUDA OOM  (trial {trial_id})  {model_id}"
               f"  bs={hp['per_device_train_batch_size']}\n{_BORDER}\n")
-        _report_to_tune({**_FAILED_REPORT, "error": "cuda_oom"})
+        _report_to_tune({**_failed_report(hp), "error": "cuda_oom"})
     except Exception as exc:
         print(f"\n{_BORDER}\n  ✗ TRAIN ERROR  (trial {trial_id})  {model_id}"
               f"\n  {exc}\n{_BORDER}\n")
-        _report_to_tune({**_FAILED_REPORT, "error": str(exc)})
+        _report_to_tune({**_failed_report(hp), "error": str(exc)})
 
 
 # =============================================================================
@@ -1993,7 +2013,8 @@ def train_final_model(
             remove_unused_columns=False,  # Keep 'text' column for TemplateDilutionCollator
         )
         
-        trainer_class, metrics_function = _training_components(best_hp)
+        trainer_class, metrics_function = _training_components(
+            best_hp, benign_per_malicious_val)
         trainer = trainer_class(
             model=model,
             args=train_args,
@@ -2008,6 +2029,8 @@ def train_final_model(
             gamma_neg=float(best_hp.get("gamma_neg", 4.0)),
             asl_clip=float(best_hp.get("asl_clip", 0.05)),
             check_finite_every=int(_perf_flag(perf_cfg, "check_finite_every", 50)),
+            **({"malicious_per_batch": int(best_hp.get("malicious_per_batch", 0))}
+               if _segment_enabled(best_hp) else {}),
         )
         
         trainer.train()

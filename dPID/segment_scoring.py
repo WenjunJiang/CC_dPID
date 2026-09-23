@@ -18,7 +18,13 @@ from transformers.models.modernbert.modeling_modernbert import ModernBertModel, 
 
 SCORING_MODE = "token_max_subarray_v1"
 MASK_KEYS = ("valid_token_mask", "malicious_mask", "benign_mask")
-SEGMENT_HP = ("segment_tau", "region_loss_weight", "malicious_top_k", "benign_top_k", "token_head_dropout")
+SEGMENT_HP = ("segment_tau", "region_loss_weight", "positive_coverage", "benign_top_k",
+              "token_head_dropout", "leak_loss_weight")
+
+# `positive_coverage` replaces the former constant `malicious_top_k`. The scoring
+# function is unchanged, so checkpoints trained under either objective decode
+# identically and SCORING_MODE stays put; only training needs the new key, and
+# an old HPO checkpoint is rejected because it cannot supply it.
 
 
 def maximum_subarray(logits, valid_mask, tau):
@@ -61,8 +67,38 @@ def maximum_subarray(logits, valid_mask, tau):
     return score, start, end + 1
 
 
-def stable_sequence_asl(margin, labels, gamma_pos=1.0, gamma_neg=2.0, clip=0.01):
-    """ASL without a hard logit clamp or a saturated sigmoid-to-log round trip."""
+def prior_weights(labels, prior_ratio):
+    """Restore the `prior_ratio` prior from a batch that was stratified away from it.
+
+    A stratified batch over-represents the minority class deliberately, to remove
+    the steps where it is absent altogether; at 30:1 with a micro-batch of 32,
+    35% of steps carry no malicious sample and 71% carry no long-context one.
+    Reweighting keeps the objective identical in expectation, so stratification
+    buys lower gradient variance rather than a different problem.
+
+    The weights are one everywhere when the batch already sits at the prior, and
+    an absent class cannot contribute regardless of the weight assigned to it.
+    """
+    y = labels.float().reshape(-1)
+    total = y.numel()
+    positives = y.sum()
+    share = 1.0 / (1.0 + float(prior_ratio))
+    return torch.where(
+        y > 0,
+        share * total / positives.clamp(min=1.0),
+        (1.0 - share) * total / (total - positives).clamp(min=1.0),
+    )
+
+
+def stable_sequence_asl(margin, labels, gamma_pos=1.0, gamma_neg=2.0, clip=0.01,
+                        prior_ratio=None):
+    """ASL without a hard logit clamp or a saturated sigmoid-to-log round trip.
+
+    `prior_ratio` is the benign:malicious ratio the batch would have had without
+    stratification; leaving it None keeps the plain mean. The region term needs
+    no such correction: each of its halves already averages over the samples that
+    own that region, so it does not move with the class balance.
+    """
     z = margin.float()
     y = labels.float().reshape(-1)
     log_p, log_not_p = F.logsigmoid(z), F.logsigmoid(-z)
@@ -74,27 +110,79 @@ def stable_sequence_asl(margin, labels, gamma_pos=1.0, gamma_neg=2.0, clip=0.01)
     else:
         shifted = log_not_p
     negative = -shifted * torch.exp(gamma_neg * log_p)
-    return (y * positive + (1 - y) * negative).mean()
+    per_sample = y * positive + (1 - y) * negative
+    if prior_ratio is None:
+        return per_sample.mean()
+    return (prior_weights(y, prior_ratio) * per_sample).mean()
 
 
-def region_loss_per_sample(token_logits, malicious_mask, benign_mask, malicious_k, benign_k):
-    """Each region contributes exactly one half, including when one is empty."""
-    def region(mask, k, positive):
-        if int(k) <= 0:
-            raise ValueError("Region top-k must be positive")
-        mask = mask.bool()
-        count = mask.sum(dim=1).clamp(max=int(k))
-        selected = token_logits.float().masked_fill(~mask, -torch.inf).topk(
-            min(int(k), token_logits.shape[1]), dim=1,
-        ).values
-        ranks = torch.arange(selected.shape[1], device=selected.device)[None, :]
-        pooled = selected.masked_fill(ranks >= count[:, None], 0).sum(dim=1) / count.clamp(min=1)
-        losses = F.softplus(-pooled if positive else pooled)
-        return torch.where(count > 0, losses, torch.zeros_like(losses))
+def _pooled_top(token_logits, mask, count):
+    """Mean of the highest `count[i]` in-region logits, zero where the region is empty.
 
-    if (malicious_mask.bool() & benign_mask.bool()).any():
+    `count` varies per sample, so the top-k width is the batch maximum and ranks
+    at or beyond a row's own count are zeroed. An empty region yields count 0,
+    which masks every rank away before the sum and therefore never lets the
+    -inf placeholders reach the result.
+    """
+    width = max(1, int(count.max().item()))
+    selected = token_logits.float().masked_fill(~mask, -torch.inf).topk(
+        min(width, token_logits.shape[1]), dim=1,
+    ).values
+    ranks = torch.arange(selected.shape[1], device=selected.device)[None, :]
+    return selected.masked_fill(ranks >= count[:, None], 0).sum(dim=1) / count.clamp(min=1)
+
+
+def region_losses(token_logits, malicious_mask, benign_mask, positive_coverage, benign_k):
+    """Per-sample region losses plus which samples own each region.
+
+    Returned unreduced so the caller can normalize each half by the number of
+    samples that HAVE that region. Averaging the combined term over the batch
+    instead makes the two halves unequal the moment the classes are imbalanced:
+    at 30:1 only one sample in 31 owns a positive region, so its aggregate
+    weight collapses by that factor while the negative half keeps full weight.
+
+    The positive width scales with the payload rather than being a constant:
+    a fixed k is fully satisfied by concentrating the whole score on k tokens,
+    which is exactly the degenerate two-token window this model converges to
+    otherwise. `positive_coverage` is the fraction of the payload that must read
+    as evidence, so widening the selected segment is what lowers the loss.
+    """
+    positive, negative = malicious_mask.bool(), benign_mask.bool()
+    if (positive & negative).any():
         raise ValueError("Malicious and benign regions must not overlap")
-    return 0.5 * region(malicious_mask, malicious_k, True) + 0.5 * region(benign_mask, benign_k, False)
+    if not 0.0 < float(positive_coverage) <= 1.0:
+        raise ValueError("positive_coverage must lie in (0, 1]")
+    if int(benign_k) <= 0:
+        raise ValueError("Region top-k must be positive")
+
+    positive_size = positive.sum(dim=1)
+    positive_count = torch.minimum(
+        (positive_size.float() * float(positive_coverage)).ceil().long(), positive_size)
+    positive_loss = F.softplus(-_pooled_top(token_logits, positive, positive_count))
+
+    negative_size = negative.sum(dim=1)
+    negative_count = negative_size.clamp(max=int(benign_k))
+    negative_loss = F.softplus(_pooled_top(token_logits, negative, negative_count))
+
+    return positive_loss, positive_size > 0, negative_loss, negative_size > 0
+
+
+def _region_half(losses, owned):
+    """Mean over the samples that own the region, zero when none of them do."""
+    owned = owned.to(losses.dtype)
+    return (losses * owned).sum() / owned.sum().clamp(min=1)
+
+
+def leak_loss_per_sample(token_logits, window, malicious_mask, tau):
+    """Positive evidence the decoder picked up outside the annotated payload.
+
+    One-sided on purpose: it penalizes a window that reaches past the payload and
+    says nothing about one that stops short. The dataset carries payload
+    boundaries, not finer attack spans, so requiring the window to equal the span
+    would assume a precision the labels do not have; forbidding leakage does not.
+    """
+    outside = window & ~malicious_mask.bool()
+    return F.relu((token_logits.float() - float(tau)).masked_fill(~outside, 0).sum(dim=1))
 
 
 @dataclass
@@ -128,8 +216,17 @@ class SegmentForSequenceClassification(ModernBertPreTrainedModel):
                 or not math.isfinite(float(config.region_loss_weight))
                 or float(config.region_loss_weight) < 0):
             raise ValueError("Invalid segment tau or region loss weight")
-        if min(int(config.malicious_top_k), int(config.benign_top_k)) <= 0:
+        if int(config.benign_top_k) <= 0:
             raise ValueError("Region top-k values must be positive")
+        # Checkpoints written before the coverage objective carry neither key and
+        # still decode correctly, so validate them only where they are present.
+        if hasattr(config, "positive_coverage") and not 0.0 < float(config.positive_coverage) <= 1.0:
+            raise ValueError("positive_coverage must lie in (0, 1]")
+        if hasattr(config, "leak_loss_weight") and float(config.leak_loss_weight) < 0:
+            raise ValueError("leak_loss_weight must not be negative")
+        prior = getattr(config, "stratified_prior_ratio", None)
+        if prior is not None and float(prior) <= 0:
+            raise ValueError("stratified_prior_ratio must be positive")
         self.num_labels = 2
         self.model = encoder if encoder is not None else ModernBertModel(config)
         self.token_evidence_head = SegmentTokenHead(config.hidden_size, config.token_head_dropout)
@@ -159,8 +256,10 @@ class SegmentForSequenceClassification(ModernBertPreTrainedModel):
         logits = torch.stack((torch.zeros_like(scores), scores), dim=-1)
         loss = None
         if labels is not None:
-            loss = stable_sequence_asl(scores, labels, self.config.gamma_pos,
-                                       self.config.gamma_neg, self.config.asl_clip)
+            loss = stable_sequence_asl(
+                scores, labels, self.config.gamma_pos, self.config.gamma_neg,
+                self.config.asl_clip,
+                getattr(self.config, "stratified_prior_ratio", None) if self.training else None)
             if self.training and self.config.region_loss_weight > 0:
                 if malicious_mask is None or benign_mask is None:
                     raise ValueError("Segment training requires both region masks")
@@ -169,10 +268,25 @@ class SegmentForSequenceClassification(ModernBertPreTrainedModel):
                     raise ValueError("Region masks must cover exactly the valid tokens")
                 if not torch.equal(positive.any(dim=1), labels.bool()):
                     raise ValueError("Region masks and sentence labels disagree")
-                loss = loss + self.config.region_loss_weight * region_loss_per_sample(
+                positive_loss, owns_positive, negative_loss, owns_negative = region_losses(
                     token_logits, positive, negative,
-                    self.config.malicious_top_k, self.config.benign_top_k,
-                ).mean()
+                    self.config.positive_coverage, self.config.benign_top_k,
+                )
+                # Each half is a mean over its own owners, so the positive term
+                # keeps full weight at any class ratio.
+                loss = loss + self.config.region_loss_weight * (
+                    0.5 * _region_half(positive_loss, owns_positive)
+                    + 0.5 * _region_half(negative_loss, owns_negative)
+                )
+                leak_weight = float(getattr(self.config, "leak_loss_weight", 0.0))
+                if leak_weight > 0:
+                    positions = torch.arange(valid.shape[1], device=valid.device)[None, :]
+                    window = (positions >= start[:, None]) & (positions < end[:, None]) & valid
+                    loss = loss + leak_weight * _region_half(
+                        leak_loss_per_sample(token_logits, window, positive,
+                                             self.config.segment_tau),
+                        owns_positive,
+                    )
         return SegmentOutput(loss=loss, logits=logits,
                              segment_diagnostics=torch.stack((valid.sum(dim=1), end - start), dim=1),
                              segment_window=torch.stack((start, end), dim=1) if return_segment_window else None)
@@ -192,6 +306,10 @@ def make_segment_model(base_model, tokenizer, hp):
         setattr(config, name, hp[name])
     for name, default in (("gamma_pos", 1.0), ("gamma_neg", 2.0), ("asl_clip", 0.01)):
         setattr(config, name, float(hp.get(name, default)))
+    # Only present when the training loop stratifies the micro-batch; absent it,
+    # the sequence loss stays a plain mean and nothing is reweighted.
+    if hp.get("stratified_prior_ratio") is not None:
+        config.stratified_prior_ratio = float(hp["stratified_prior_ratio"])
     return SegmentForSequenceClassification(config, encoder=base_model.model)
 
 

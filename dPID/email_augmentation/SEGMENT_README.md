@@ -20,14 +20,15 @@ The default configuration is
 `configs/training/peft_benign_exposure_mmbert2_email_segment.yaml`.
 It runs **20 total Optuna trials**, then trains a fresh final model with the
 winning hyperparameters, calibrates on the calibration split, and evaluates on
-the test split. ASHA may stop unsuccessful trials early, after a two-epoch grace
-period. The first five trials cover every categorical candidate at least once;
-they are not a full grid. Selection remains validation F1, never test metrics.
+the test split. ASHA may stop unsuccessful trials early, after a three-epoch
+grace period. The first five trials cover every categorical candidate at least
+once; they are not a full grid. Selection is `val_selection_pr_auc` on
+validation, never test metrics.
 
 Output:
 
 ```text
-benign_exposure_peft_mmbert2_email_segment_seed42/
+benign_exposure_peft_mmbert2_email_segment_coverage_seed42/
   checkpoints/hpo_complete.json
   segment_search_space.json
   email_augmentation/
@@ -73,14 +74,14 @@ Replace `1` with an available GPU. This is an independent process outside Ray's
 resource scheduling; sharing an occupied GPU can cause OOM or slow down HPO.
 No HPO pause, restore, or restart is performed.
 
-The default source is `benign_exposure_peft_mmbert2_email_segment_seed42`.
+The default source is `benign_exposure_peft_mmbert2_email_segment_coverage_seed42`.
 For a different run or a named output directory:
 
 ```bash
 python train_benign_exposure_mmbert2_dilute_email_segment.py \
   --final-from-current \
-  --hpo-dir benign_exposure_peft_mmbert2_email_segment_seed42 \
-  --output-dir benign_exposure_peft_mmbert2_email_segment_seed42_preview1
+  --hpo-dir benign_exposure_peft_mmbert2_email_segment_coverage_seed42 \
+  --output-dir benign_exposure_peft_mmbert2_email_segment_coverage_seed42_preview1
 ```
 
 - `--hpo-dir` is the run root, not its `benign_exposure_hpo/` child. Its saved
@@ -89,7 +90,8 @@ python train_benign_exposure_mmbert2_dilute_email_segment.py \
   status `TERMINATED`, no recorded failures, and `epoch >= num_train_epochs`
   qualify. Running trials and ASHA-pruned trials below their epoch budget are
   excluded, even when their partial scores are higher.
-- Rank by the **last reported `val_f1`**, not an earlier peak. Exact ties use
+- Rank by the **last reported `hpo.metric`** (`val_selection_pr_auc` for this
+  config; `val_f1` for older runs), not an earlier peak. Exact ties use
   trial ID. If no trial qualifies, exit without creating an output directory.
   Ray state flushing may lag behind logs; retry after its next flush. An
   incomplete JSON write falls back to the previous readable snapshot.
@@ -116,8 +118,10 @@ set; use validation for development decisions.
 z = token_head(encoder(input))
 sequence_logit = max over nonempty contiguous intervals I: sum(z[t] - tau for t in I)
 logits = [0, sequence_logit]
-loss = ASL(sequence_logit, label) + region_loss_weight * region_loss
-region_loss[sample] = 0.5 * positive_region_BCE + 0.5 * negative_region_BCE
+loss = ASL_w(sequence_logit, label)
+     + region_loss_weight * (0.5 * mean_{samples with payload} positive_region_BCE
+                           + 0.5 * mean_{samples with benign tokens} negative_region_BCE)
+     + leak_loss_weight * mean_{malicious samples} relu(sum over window \ payload of (z - tau))
 ```
 
 - Tau is fixed within each trial, selected by HPO, and saved in `config.json`.
@@ -129,11 +133,24 @@ region_loss[sample] = 0.5 * positive_region_BCE + 0.5 * negative_region_BCE
   Gradients flow through the selected token sum; spans never select the interval.
 - Training, calibration, manual prediction, and PR inference all call this same
   model forward/scoring function. Region masks are only needed during training.
-- Positive-region BCE uses the mean of the highest `malicious_top_k` logits in
-  the inserted malicious payload. Negative-region BCE uses the mean of the
-  highest `benign_top_k` logits outside that payload, or across all valid tokens
-  of a benign example. Each K is clamped to its region size. A missing region
-  contributes zero, without redistributing its half-weight. Average across samples.
+- Positive-region BCE uses the mean of the highest `ceil(positive_coverage *
+  payload_tokens)` logits in the inserted malicious payload. The count scales
+  with the payload: a constant K was satisfied by a two-token window, which a
+  single case change (`ignore` -> `Ignore`) then removed. Negative-region BCE
+  uses the mean of the highest `benign_top_k` logits outside that payload, or
+  across all valid tokens of a benign example, clamped to the region size.
+- Each half is averaged over the samples that own that region, not over the
+  batch. A batch mean diluted the positive half by the class ratio (about 31x at
+  30:1). This matches the legacy `region_supervision.py`, which selected
+  `token_logits[has_region]` before averaging.
+- The leak term (optional, `leak_loss_weight`) penalizes positive evidence the
+  decoded window picks up outside the payload. It is one-sided: a window that
+  stops inside the payload is not penalized.
+- With `malicious_per_batch > 0`, `StratifiedOrder` places that many malicious
+  samples in every micro-batch (no larger batch, no extra memory), and `ASL_w`
+  reweights the sequence loss back to the `benign_to_malicious_ratio` prior via
+  `stratified_prior_ratio`, so the objective is unchanged in expectation.
+  Evaluation and calibration use the unweighted mean.
 - The source dataset has payload-level labels, not finer attack spans: the
   inserted payload boundary defines the positive region. Common words inside it
   are **not** forced individually to be malicious. Masks use tokenizer character
@@ -150,24 +167,31 @@ region_loss[sample] = 0.5 * positive_region_BCE + 0.5 * negative_region_BCE
 The six-form sampling proportions, email splits, insertion positions, and
 payload/template preservation stay as described in [README.md](README.md).
 Region-enabled fixed views use a new cache identity and store three masks.
-Validation logs include recall, FPR, and selected-interval length for short
-(under 128 valid tokens), medium (128–255), and long (256–512) inputs.
+Validation logs include recall, FPR, selected-interval length, and PR-AUC for
+short (under 128 valid tokens), medium (128–255), and long (256–512) inputs.
+PR-AUC is reweighted from the validation ratio (50:1) to deployment (500:1).
+HPO selects on `val_selection_pr_auc`, the worst bucket's PR-AUC: `val_f1`
+separated the previous top three trials by 0.0007.
 
 ## HPO ranges
 
 | Parameter | Search range |
 | --- | --- |
 | `segment_tau` | 0, 0.5, 1, 2, 4 |
-| `region_loss_weight` | 0.05, 0.1, 0.2, 0.5, 1 |
-| `malicious_top_k` | 1, 3, 5 |
+| `region_loss_weight` | 0.1, 0.2, 0.5, 1 |
+| `positive_coverage` | 0.25, 0.5, 0.75 |
 | `benign_top_k` | 3, 8, 16, 32 |
+| `leak_loss_weight` | 0, 0.1, 0.5 |
+| `gamma_pos` | 0, 0.5, 1 |
 | `learning_rate` | Log-uniform, 1e-5 to 3e-4 |
 | `token_head_dropout` | 0, 0.1, 0.2 |
 | `effective_batch_size` | 16, 32, 64 |
 | `num_train_epochs` | 3, 5, 8 |
 
-Fixed: LoRA r=16, alpha=64, dropout=0; ASL gamma_pos=1, gamma_neg=2,
-clip=0.01; weight decay=0.01; warmup=0.1; benign:malicious training ratio=30.
+Fixed: LoRA r=16, alpha=64, dropout=0; ASL gamma_neg=2, clip=0.01; weight
+decay=0.01; warmup=0.1; benign:malicious training ratio=30; malicious_per_batch=4.
+Malicious form weights are `[0.2, 0.2, 0.3, 0.3, 0, 0]` (long-context forms up
+from 1/3 to 3/5 of the malicious budget).
 Effective batch is per trial's single GPU: micro-batch is capped at 32, with
 gradient accumulation for 64. Lower `perf.max_micro_batch_size` if needed;
 the cap must divide the selected effective batch.
@@ -182,7 +206,7 @@ up to 512 tokens. A window is also selected for SAFE inputs; it is not a labeled
 attack span. No retraining or recalibration is required to display it.
 
 ```bash
-export PR_MODEL_PATH="benign_exposure_peft_mmbert2_email_segment_seed42/best_model/jhu-clsp_mmBERT-small"
+export PR_MODEL_PATH="benign_exposure_peft_mmbert2_email_segment_coverage_seed42/best_model/jhu-clsp_mmBERT-small"
 python predict_prompt.py --training-mode peft --file test_prompt1.txt --single
 
 PR_DATA_SPLIT_DIR=data_split3/42 \
@@ -229,8 +253,9 @@ Precision=0.90 and recall=0.90 reference lines are included. It never fits a new
 calibrator or searches for a threshold on the test sets. Metrics use exact
 `score >= threshold` decisions, not the nearest sampled curve threshold.
 The default calibration path is the final segment checkpoint under
-`benign_exposure_peft_mmbert2_email_segment_seed42/best_model/jhu-clsp_mmBERT-small/`.
-For another checkpoint (including an interim model), pass
+`benign_exposure_peft_mmbert2_email_segment_seed42/best_model/jhu-clsp_mmBERT-small/`
+(the pre-coverage run; the plotting script's default is unchanged). For the
+coverage run, or another checkpoint (including an interim model), pass
 `--calibration-file /path/to/that/checkpoint/calibration.json`.
 Both input runs must use that same checkpoint/calibration; the saved columns
 alone cannot verify provenance. `calibration_dilute.json` is not used.

@@ -16,8 +16,10 @@ import uuid
 from omegaconf import OmegaConf
 
 
-DEFAULT_HPO_DIR = "benign_exposure_peft_mmbert2_email_segment_seed42"
+DEFAULT_HPO_DIR = "benign_exposure_peft_mmbert2_email_segment_coverage_seed42"
 SCORING_MODE = "token_max_subarray_v1"
+# Both lie in [0, 1] and are maximized; the segment config selects on the second.
+SELECTION_METRICS = ("val_f1", "val_selection_pr_auc")
 
 
 def read_experiment_snapshot(source):
@@ -57,12 +59,13 @@ def select_current_best(source):
     if (cfg.training.get("mode") != "peft" or not cfg.training.get("segment_scoring", False)
             or not cfg.email.get("region_supervision", False)):
         raise ValueError("The source must be a PEFT segment-scoring email run")
-    if cfg.hpo.metric != "val_f1":
-        raise ValueError("Interim selection currently requires hpo.metric=val_f1")
+    metric = str(cfg.hpo.metric)
+    if metric not in SELECTION_METRICS:
+        raise ValueError(f"Interim selection supports hpo.metric in {SELECTION_METRICS}, got {metric}")
     records, state_path, digest = read_experiment_snapshot(source)
     required = set(cfg.training.search_space) | {"model_name", "seed", "segment_tau",
-        "region_loss_weight", "malicious_top_k", "benign_top_k", "effective_batch_size",
-        "token_head_dropout", "num_train_epochs", "lora_r", "lora_alpha", "lora_dropout"}
+        "region_loss_weight", "positive_coverage", "benign_top_k", "leak_loss_weight",
+        "effective_batch_size", "token_head_dropout", "num_train_epochs", "lora_r", "lora_alpha", "lora_dropout"}
     candidates, skipped = [], Counter()
     for trial, metadata in records:
         if trial.get("status") != "TERMINATED":
@@ -80,7 +83,7 @@ def select_current_best(source):
         try:
             if not required <= hp.keys() or int(hp["seed"]) != int(cfg.data.seed):
                 raise ValueError("Missing parameters or mismatched seed")
-            epochs, epoch, score = float(hp["num_train_epochs"]), float(result["epoch"]), float(result["val_f1"])
+            epochs, epoch, score = float(hp["num_train_epochs"]), float(result["epoch"]), float(result[metric])
             if not all(math.isfinite(v) for v in (epochs, epoch, score)) or epochs <= 0 or not 0 <= score <= 1:
                 raise ValueError("Invalid metric or epoch")
             if epoch + 1e-6 < epochs:
@@ -95,7 +98,7 @@ def select_current_best(source):
     if not candidates:
         raise ValueError(f"No fully completed valid trials yet (excluded: {dict(skipped)}). "
                          "Wait for a full epoch budget and Ray's next state flush, then retry.")
-    # Last reported F1, not the historical peak. Trial ID breaks exact ties.
+    # Last reported value, not the historical peak. Trial ID breaks exact ties.
     score, trial_id, hp, result = sorted(candidates, key=lambda row: (-row[0], row[1]))[0]
     metrics = {key: value for key, value in result.items()
                if isinstance(value, (int, float)) and math.isfinite(value)}
@@ -103,7 +106,7 @@ def select_current_best(source):
         best_hp=hp, best_metrics=metrics, source_trial_id=trial_id,
         source_hpo_dir=str(source), source_state_file=str(state_path),
         source_state_sha256=digest, selected_at=datetime.now(timezone.utc).isoformat(),
-        selection="highest last val_f1 among TERMINATED trials reaching num_train_epochs",
+        selection=f"highest last {metric} among TERMINATED trials reaching num_train_epochs",
         eligible_trials=len(candidates), excluded_trials=dict(skipped))
     return cfg, snapshot
 
