@@ -1,0 +1,18 @@
+{
+  "arm": "redrawn",
+  "seed": 2,
+  "epochs": 8,
+  "threshold_at_1pct_fpr": 0.5427777171134949,
+  "pr_auc_as_written": 0.036536192089392086,
+  "pr_auc_flipped": 0.10036563435802291,
+  "recall_as_written": 0.14,
+  "recall_flipped": 0.17,
+  "fpr_as_written": 0.01,
+  "fpr_flipped": 0.006,
+  "malicious_decision_flips": 0.07,
+  "benign_decision_flips": 0.008,
+  "malicious_margin_shift": 0.8278219699859619,
+  "benign_margin_shift": -0.08528594672679901,
+  "n_malicious": 100,
+  "n_benign": 3000
+}

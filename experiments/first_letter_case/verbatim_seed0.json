@@ -1,0 +1,18 @@
+{
+  "arm": "verbatim",
+  "seed": 0,
+  "epochs": 8,
+  "threshold_at_1pct_fpr": 0.5461857914924622,
+  "pr_auc_as_written": 0.03424130972997622,
+  "pr_auc_flipped": 0.00925035367934993,
+  "recall_as_written": 0.17,
+  "recall_flipped": 0.07,
+  "fpr_as_written": 0.01,
+  "fpr_flipped": 0.013666666666666667,
+  "malicious_decision_flips": 0.1,
+  "benign_decision_flips": 0.006333333333333333,
+  "malicious_margin_shift": -1.4312187433242798,
+  "benign_margin_shift": 0.12739260494709015,
+  "n_malicious": 100,
+  "n_benign": 3000
+}
