@@ -1,0 +1,10 @@
+# configs/models/default.yaml
+# Direct replacement for the hardcoded MODELS dict in raytune_benchmark.py
+
+# @package _global_
+specs:
+  distilbert-base-multilingual-cased:
+    family: bert
+    architecture_type: encoder_only
+    peft_target_modules: [q_lin, v_lin]
+    enabled: true

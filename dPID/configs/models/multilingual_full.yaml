@@ -1,0 +1,41 @@
+# configs/models/multilingual_full.yaml
+#
+# Matches the original multilingual_model_set_ft.json: 1 encoder + 1 decoder.
+# Usage: python -m src.run models=full hpo.num_samples=10
+
+specs:
+  FacebookAI/xlm-roberta-base:
+    family: mroberta
+    architecture_type: encoder_only
+    peft_target_modules: [query, key, value, dense]
+    enabled: true
+  microsoft/mdeberta-v3-base:
+    family: mdeberta
+    architecture_type: encoder_only
+    peft_target_modules: [query_proj, key_proj, value_proj, dense]
+    enabled: true
+  jhu-clsp/mmBERT-base:
+    family: mmbert
+    architecture_type: encoder_only
+    peft_target_modules: [Wqkv, Wi, Wo]
+    enabled: true
+  google-bert/bert-base-multilingual-cased:
+    family: mbert
+    architecture_type: encoder_only
+    peft_target_modules: [query, key, value, dense]
+    enabled: true
+  microsoft/Multilingual-MiniLM-L12-H384:
+    family: mroberta
+    architecture_type: encoder_only
+    peft_target_modules: [query, key, value, dense]
+    enabled: true
+  jhu-clsp/mmBERT-small:
+    family: mmbert
+    architecture_type: encoder_only
+    peft_target_modules: [Wqkv, Wi, Wo]
+    enabled: true
+  distilbert-base-multilingual-cased:
+    family: mbert
+    architecture_type: encoder_only
+    peft_target_modules: [q_lin, k_lin, v_lin, out_lin]
+    enabled: true

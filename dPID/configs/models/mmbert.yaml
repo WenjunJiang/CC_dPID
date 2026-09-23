@@ -1,0 +1,11 @@
+# configs/models/multilingual_minimal.yaml
+#
+# Matches the original minimal_model_set.json: 1 encoder + 1 decoder.
+# Usage: python -m src.run models=minimal hpo.num_samples=10
+
+specs:
+  jhu-clsp/mmBERT-small:
+    family: mmbert
+    architecture_type: encoder_only
+    peft_target_modules: [Wqkv, Wi, Wo]
+    enabled: true

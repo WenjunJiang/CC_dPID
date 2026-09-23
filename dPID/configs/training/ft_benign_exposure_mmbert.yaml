@@ -1,0 +1,70 @@
+# configs/training/ft_benign_exposure.yaml
+# Phase 1 training with benign exposure optimization
+#
+# This configuration extends the standard ft.yaml with benign exposure sampling.
+# The training data is sampled with a configurable benign:malicious ratio to
+# optimize the model's exposure to benign samples during training.
+
+defaults:
+  - _self_
+
+# Data paths (output from split_dataset.py)
+data:
+  split_dir: "data_split"
+  seed: 42
+  max_seq_length: 512
+
+# Validation set ratio (fixed 1:50)
+validation:
+  benign_per_malicious: 50
+
+# Calibration settings
+calibration:
+  beta: 1                    # F-beta parameter for threshold optimization
+  temp_ratio: 10               # 10:1 for temperature scaling
+  threshold_ratio: 500        # 1000:1 for threshold optimization
+
+# Test settings  
+test:
+  benign_per_malicious: 500   # 1000:1 for test set (deployment-like)
+
+# Ray Tune settings
+hpo:
+  num_samples: 30
+  max_epochs: 6
+  metric: "val_f1"
+  mode: "max"
+  search_alg: "optuna"
+  cpus_per_trial: 5
+  gpus_per_trial: 0.4
+  max_concurrent_trials: 1
+
+# Output (includes seed to prevent overwriting results from different seeds)
+ray:
+  output_dir: "benign_exposure_results_mmbert_seed${data.seed}"
+
+# Training config (wraps search_space for compatibility with build_benign_exposure_space)
+training:
+  mode: "ft"
+  search_space:
+    # ── Standard hyperparameters (from ft.yaml) ──
+    classifier_dropout:           {type: uniform,     low: 1e-6,   high: 0.5}
+    learning_rate:                {type: loguniform,  low: 1e-6,  high: 1e-3}
+    weight_decay:                 {type: uniform,     low: 0.0,   high: 0.15}
+    per_device_train_batch_size:  {type: choice,      values: [2, 4, 8, 16, 32]}
+    num_train_epochs:             {type: randint,     low: 2,     high: 6}
+    gradient_accumulation_steps:  {type: choice,      values: [1, 2, 4, 8]}
+    warmup_ratio:                 {type: uniform,     low: 0.0,   high: 0.15}
+
+    # ── Benign exposure sampling parameter ──
+    # Benign data is 1x, 2x, 3x, or 5x the size of malicious data
+    benign_to_malicious_ratio:    {type: choice,      values: [5, 10, 15, 20, 25, 30]}
+
+    # ── ASL Loss hyperparameters ──
+    # Asymmetric Loss for imbalanced classification
+    # gamma_pos: focusing for positive (malicious) samples - usually fixed at 0 for extreme imbalance
+    gamma_pos:                    {type: choice,      values: [0.0, 0.5, 1.0]}
+    # gamma_neg: focusing for negative (benign) samples - lower values for stability (recommended: 0.5-2.0)
+    gamma_neg:                    {type: choice,      values: [0.5, 1.0, 1.5, 2.0]}
+    # asl_clip: probability shift to suppress easy negative examples - lower values for stability
+    asl_clip:                     {type: choice,      values: [0.0, 0.01, 0.02]}

@@ -1,0 +1,108 @@
+# configs/data_split_config2.yaml
+#
+# Configuration for splitting datasets into train/val/cal/test sets
+# for prompt injection detection model training.
+#
+# This configuration creates 16 datasets:
+# - M_core: Malicious core from samsung/dqi_malicious
+# - B_core: Benign core from samsung/dqi_benign + samsung/dqi_benign_hard
+# - M_extra: Malicious extra from various datasets with label=True
+# - B_extra: Benign extra from various datasets with label=False
+# Each split into train, val, cal, test
+#
+# Usage:
+#   python split_dataset2.py
+#   python split_dataset2.py seed=123
+#   python split_dataset2.py output_dir=my_output
+#
+
+# Hydra defaults
+defaults:
+  - _self_
+
+# Source parquet. dev_qa_DEV_v2.parquet is dev_qa_DEV.parquet plus the generated
+# agent-directive rows (see data_curation/merge_extra_sources.py). The original file is
+# never modified, so reverting means pointing this back at it.
+parquet_path: "evaluation/dev_qa_DEV_v2.parquet"
+
+# M_core dataset (malicious core)
+m_core_dataset:
+  name: "samsung/dqi_malicious"
+  path: "evaluation/PromptInjection/samsung/dqi_malicious"
+
+# B_core datasets (benign core - will be combined)
+b_core_datasets:
+  - name: "samsung/dqi_benign"
+    path: "evaluation/PromptInjection/samsung/dqi_benign"
+  - name: "samsung/dqi_benign_hard"
+    path: "evaluation/PromptInjection/samsung/dqi_benign_hard"
+
+# M_extra datasets (malicious extra - filter for label=True)
+m_extra_datasets:
+  - name: "samsung/prompt_injection_p0"
+    path: "evaluation/PromptInjection/samsung/prompt_injection_p0"
+  - name: "deepset/prompt-injections"
+    path: "evaluation/PromptInjection/deepset/prompt-injections"
+  - name: "jackhhao/jailbreak-classification"
+    path: "evaluation/PromptInjection/jackhhao/jailbreak-classification"
+  - name: "neuralchemy/Prompt-injection-dataset"
+    path: "evaluation/PromptInjection/neuralchemy/Prompt-injection-dataset"
+  # Content-embedded directives that instruct the assistant to invoke a tool or fetch an
+  # endpoint, with no override vocabulary. Measured gap: only 105 such rows existed and
+  # only 16 malicious rows carried a URL at all, which left both features unsupervised.
+  - name: "samsung/dqi_agent_directive"
+    path: "evaluation/agent_directive_v1.jsonl"
+
+# B_extra datasets (benign extra - filter for label=False)
+b_extra_datasets:
+  - name: "Atmanstr/MultiDomain_Instruction"
+    path: "evaluation/PromptInjection/Atmanstr/MultiDomain_Instruction"
+  # EXCLUDED 2026-09-01: the upstream HF dataset carries no benign/malicious
+  # label, so the benign label on these 567,315 rows was assigned by our
+  # curation pipeline, not by the source. It shows: in the seed42 test pool this
+  # source accounts for 146 of the 173 highest-scoring benign rows (977.6 ppm vs
+  # 17-77 ppm for the other non-hard sources), many of them plain jailbreaks
+  # (see data_analysis/reports/benign_fp_review_seed42.csv). Keeping it caps the
+  # top of the PR curve with label noise.
+  # - name: "eddforsure/QueryLLM"
+  #   path: "evaluation/PromptInjection/eddforsure/QueryLLM"
+  - name: "guychuk/benign-malicious-prompt-classification"
+    path: "evaluation/PromptInjection/guychuk/benign-malicious-prompt-classification"
+  - name: "nandhak12/finguard-finance-injection-dataset"
+    path: "evaluation/PromptInjection/nandhak12/finguard-finance-injection-dataset"
+  - name: "yassiracharki/Yahoo_Answers_10_categories_for_NLP"
+    path: "evaluation/PromptInjection/yassiracharki/Yahoo_Answers_10_categories_for_NLP"
+  # Matched negatives for the rows above: same carriers, same links, same authority
+  # wording, but the instruction targets a human or describes a completed action. Without
+  # these the fix would just install "URL + directive words => malicious" as the next
+  # shortcut. The current model false-positives 51% of them.
+  - name: "samsung/dqi_agent_directive_benign"
+    path: "evaluation/agent_directive_v1.jsonl"
+
+# Split ratios for all datasets (must sum to 1.0)
+split_ratios:
+  train: 0.70
+  val: 0.10
+  cal: 0.10
+  test: 0.10
+
+# Benign allocation ratios (relative to malicious counts)
+# Priority order: val -> cal -> test -> train
+benign_allocation:
+  val_ratio: 50          # B_extra_val = len(M_val) * 50 (1:50 ratio)
+  cal_ratio: 500         # B_extra_cal = len(M_cal) * 500 (1:500 ratio)
+  test_ratio: 500        # B_extra_test = len(M_test) * 500 (1:500 ratio)
+  train_multiplier: 30   # B_extra_train = len(M_train) * 30
+
+# Random seed for reproducibility
+seed: 42
+
+# Output directory (splits will be saved to {output_dir}/{seed}/)
+#
+# data_split3 is the post-exclusion split (QueryLLM removed above). data_split2 is
+# the pre-exclusion one and is kept only for comparison -- do not point back at it.
+#
+# NOTE: save_splits() does mkdir(parents=True, exist_ok=True) and writes straight in,
+# so re-running this script overwrites data_split3/42 without asking. Verify the
+# 16 id fingerprints afterwards if anything downstream already depends on it.
+output_dir: "data_split3"

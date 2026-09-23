@@ -1,0 +1,61 @@
+# configs/models/monolingual_full.yaml
+#
+# Matches the original full_model_set.json: 1 encoder + 1 decoder.
+# Usage: python -m src.run models=monolingual_full hpo.num_samples=10
+
+specs:
+  bert-base-cased:
+    family: bert
+    architecture_type: encoder_only
+    peft_target_modules: [query, value]
+    enabled: true
+  mobilebert-uncased:
+    family: bert
+    architecture_type: encoder_only
+    peft_target_modules: [query, value]
+    enabled: true
+  roberta-base:
+    family: bert
+    architecture_type: encoder_only
+    peft_target_modules: [query, value]
+    enabled: true
+  deberta-v3-base-prompt-injection-v2:
+    family: deberta_v3
+    architecture_type: encoder_only
+    peft_target_modules: [query_proj, value_proj]
+    enabled: true
+  distilbert-base-cased:
+    family: distilbert
+    architecture_type: encoder_only
+    peft_target_modules: [q_lin, v_lin]
+    enabled: true
+  electra-small-discriminator:
+    family: electra
+    architecture_type: encoder_only
+    peft_target_modules: [query, value]
+    enabled: true
+  electra-base-discriminator:
+    family: electra
+    architecture_type: encoder_only
+    peft_target_modules: [query, value]
+    enabled: true
+  funnel-transformer-small:
+    family: funnel
+    architecture_type: encoder_only
+    peft_target_modules: [query, value]
+    enabled: true
+  "EleutherAI/pythia-70m":
+    family: pythia
+    architecture_type: decoder_only
+    peft_target_modules: [q_proj, k_proj, v_proj]
+    enabled: true
+  "facebook/opt-125m":
+    family: opt
+    architecture_type: decoder_only
+    peft_target_modules: [q_proj, k_proj, v_proj]
+    enabled: true
+  "HuggingFaceTB/SmolLM2-135M-Instruct":
+    family: smollm
+    architecture_type: decoder_only
+    peft_target_modules: [q_proj, k_proj, v_proj]
+    enabled: true

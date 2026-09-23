@@ -1,0 +1,180 @@
+# configs/training/ft_benign_exposure_mmbert2_template.yaml
+# Phase 1 training with TEMPLATE-based augmentation
+#
+# This configuration extends the standard ft.yaml with benign exposure sampling.
+# The training data is sampled with a configurable benign:malicious ratio to
+# optimize the model's exposure to benign samples during training.
+
+defaults:
+  - _self_
+
+# Data paths (output from split_dataset.py)
+data:
+  # data_split3 excludes eddforsure/QueryLLM: the upstream HF dataset carries no
+  # benign/malicious label, and it produced 146 of the 173 highest-scoring benign
+  # false positives on the data_split2 test set (977.6 ppm vs 17-77 ppm for the
+  # other non-hard sources). See configs/data_split_config2.yaml for the exclusion
+  # and data_analysis/reports/benign_fp_review_seed42.csv for the evidence.
+  # The malicious splits are byte-identical to data_split2, so recall stays comparable.
+  split_dir: "data_split3"
+  seed: 42
+  max_seq_length: 512
+
+# Validation set ratio (fixed 1:50)
+validation:
+  benign_per_malicious: 50
+
+# Calibration settings
+#
+# The threshold is a CALIBRATED PROBABILITY, compared against
+# sigmoid(a * (logit_1 - logit_0) + b). That is safe because the Platt intercept
+# shifts every score down by roughly log(threshold_ratio), holding it clear of
+# the point where a float32 probability saturates at exactly 1.0 and merges the
+# whole head of the ranking into one operating point. check_score_resolution()
+# verifies that headroom on every run rather than assuming it.
+calibration:
+  beta: 1                     # F-beta parameter for threshold optimization
+  target_precision: 0.95      # the chosen threshold must reach at least this precision
+  min_recall: 0.9             # ...and at least this recall; F-beta breaks the tie
+  # Ratio of the view the calibrator is fitted on. Keep this equal to
+  # threshold_ratio: the calibration pool is already 1,493 : 746,500 = 1:500, so
+  # a smaller value SUBSAMPLES it. At 10:1 the fit sees 2% of the benign pool,
+  # and since only ~40 benign rows in 747,500 sit above the operating point,
+  # that subsample contains well under one benign sample near the decision
+  # boundary - which is the only region the calibrator's shape depends on.
+  # Reweighting can restore the prevalence but not the information.
+  #
+  # When the two ratios match, Step 2 reuses Step 1's predictions, so this
+  # costs one pass over the pool rather than two.
+  temp_ratio: 500
+  threshold_ratio: 500        # 500:1, the deployment-like prevalence
+
+# Test settings  
+test:
+  benign_per_malicious: 500   # 1000:1 for test set (deployment-like)
+
+# Ray Tune settings
+hpo:
+  skip: true
+  # Deliberately NOT under ray.output_dir: these are the hyperparameters tuned in
+  # July on the pre-exclusion data, reused as-is for the final-only run.
+  checkpoint_path: "benign_exposure_results_mmbert2_seed42/checkpoints/hpo_complete.json"
+  num_samples: 30
+  max_epochs: 6
+  metric: "val_f1"
+  mode: "max"
+  search_alg: "optuna"
+  cpus_per_trial: 5
+  gpus_per_trial: 0.4
+  num_nvidia_gpu_per_trial: 0.4  # if no NVIDIA GPU is used, please set this to 0
+  max_concurrent_trials: 1
+
+# Output (includes seed to prevent overwriting results from different seeds)
+ray:
+  output_dir: "benign_exposure_results_mmbert2_seed${data.seed}"
+
+# Training config (wraps search_space for compatibility with build_benign_exposure_space)
+training:
+  mode: "ft"
+  search_space:
+    # ── Standard hyperparameters (from ft.yaml) ──
+    classifier_dropout:           {type: uniform,     low: 1e-6,   high: 0.5}
+    learning_rate:                {type: loguniform,  low: 1e-6,  high: 1e-3}
+    weight_decay:                 {type: uniform,     low: 0.0,   high: 0.15}
+    per_device_train_batch_size:  {type: choice,      values: [2, 4, 8, 16, 32]}
+    num_train_epochs:             {type: randint,     low: 2,     high: 6}
+    gradient_accumulation_steps:  {type: choice,      values: [1, 2, 4, 8]}
+    warmup_ratio:                 {type: uniform,     low: 0.0,   high: 0.15}
+
+    # ── Benign exposure sampling parameter ──
+    # Benign data is 1x, 2x, 3x, or 5x the size of malicious data
+    benign_to_malicious_ratio:    {type: choice,      values: [5, 10, 15, 20, 25, 30]}
+
+    # ── ASL Loss hyperparameters ──
+    # Asymmetric Loss for imbalanced classification
+    # gamma_pos: focusing for positive (malicious) samples - usually fixed at 0 for extreme imbalance
+    gamma_pos:                    {type: choice,      values: [0.0, 0.5, 1.0]}
+    # gamma_neg: focusing for negative (benign) samples - lower values for stability (recommended: 0.5-2.0)
+    gamma_neg:                    {type: choice,      values: [0.5, 1.0, 1.5, 2.0]}
+    # asl_clip: probability shift to suppress easy negative examples - lower values for stability
+    asl_clip:                     {type: choice,      values: [0.0, 0.01, 0.02]}
+
+    # ── Region Supervision hyperparameters ──
+    region_loss_weight:             {type: choice,      values: [0.05, 0.1, 0.2, 0.5]}
+    malicious_top_k:                {type: choice,      values: [1, 3, 5]}
+    benign_top_k:                   {type: choice,      values: [1, 3, 5]}
+    token_head_dropout:             {type: choice,      values: [0.1]}
+
+# Throughput settings
+#
+# One training micro-step costs ~76ms of fixed Python-dispatch / kernel-launch
+# overhead no matter how many samples it carries (measured across the 30 trials
+# under benign_exposure_results_mmbert2_seed42/benign_exposure_hpo/: 78.2ms/step
+# at bs=2 vs 87.1ms at bs=8). At bs=2 only ~2ms of each step is real compute, so
+# ~97% of an epoch is overhead. These knobs attack the step COUNT, not the
+# per-step compute.
+#
+# NOTE: the search space is deliberately left alone. run_benign_exposure_hpo
+# resumes an interrupted run via Tuner.restore(), which replays the param space
+# stored in the experiment directory and ignores this file - so editing the
+# search space would silently do nothing to an in-flight HPO. The repack below
+# happens in code instead, and therefore applies to resumed runs too.
+perf:
+  # Fold gradient_accumulation_steps into per_device_train_batch_size, keeping
+  # the effective batch (and hence the gradient and the LR schedule) identical.
+  # (2,8) -> (16,1) is ~5.1x faster for the same maths. 32 is the largest batch
+  # the search space already contains, so it is a proven-feasible cap; raising it
+  # to 64 buys only ~7% more.
+  max_micro_batch_size: 32
+
+  # Eval batch size, decoupled from the sampled train batch. null = the search
+  # space's largest per-device batch x 2. Fixing it also makes time_this_iter_s
+  # comparable across trials.
+  eval_batch_size: null
+
+  # Sort eval batches by length. Padding is to the batch maximum, so an unsorted
+  # batch of 64 pads the 55-token-mean validation set to 370 tokens - a 6.7x
+  # waste. Exactly result-neutral: metrics are permutation-invariant and the eval
+  # collator keys template wrapping off blake2b(seed|id), not off position.
+  sort_eval_by_length: true
+
+  # ASL raises on a non-finite loss; `if not <cuda tensor>` forces a device sync
+  # every micro-step. Check every N steps instead. 1 = old behaviour, 0 = never.
+  check_finite_every: 50
+
+  # ── Below here the numerics change slightly, so results are no longer
+  # ── bit-comparable with benign_exposure_results_mmbert2_seed42. Land the
+  # ── settings above first, re-baseline, then turn these on.
+
+  # "eager" | "sdpa" | "flash_attention_2". sdpa is numerically equivalent for
+  # ModernBERT (verified max|dlogit| = 1.1e-5) and ~10% cheaper in dispatched ops.
+  attn_implementation: "eager"
+
+  # TF32 matmuls. Nothing in this repo has ever enabled it (data.py sets it but
+  # is never imported), so fp32 matmuls have been taking the ~67 TFLOPS IEEE path
+  # instead of the ~247 TFLOPS TF32 one. Adds zero extra ops, unlike bf16.
+  tf32: false
+
+  # bf16 autocast (NOT torch_dtype=bfloat16 - master weights must stay fp32 at
+  # this learning rate). fp16 is deliberately never used: it needs a GradScaler,
+  # whose normal inf-and-skip behaviour would collide with ASL raising on
+  # non-finite loss and be reported as a failed trial.
+  bf16: false
+
+# Template dilution collator settings
+#
+# Wrap ~`probability` of each batch's samples inside a randomly-chosen instruction
+# template (payload substitutes `placeholder`), leaving the label unchanged. This
+# mimics a direct prompt injection arriving inside a benign task wrapper. Applies
+# to samples of both labels. These are FIXED augmentation settings, not tunable
+# hyperparameters.
+template:
+  enabled: true                                # Set to true to enable template augmentation
+  probability: 0.5                             # Fraction of samples wrapped each batch (random mode)
+  template_path: "evaluation/bigscience_p3.jsonl"  # JSONL of templates (relative to repo root)
+  template_key: "template"                     # Field holding the template string
+  placeholder: "{PAYLOAD}"                     # Substring in the template replaced by the core text
+  max_length: 512                              # Maximum sequence length
+  text_key: "text"                             # Column name containing text in main dataset
+  label_key: "label"                           # Column name containing label in main dataset
+  id_key: "id"                                 # Column name containing sample ID (fixed-mode eval)

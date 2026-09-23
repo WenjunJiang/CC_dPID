@@ -1,0 +1,152 @@
+# configs/config.yaml
+#
+# Direct replacement for parse_args().
+# Every field below was an argparse argument.
+#
+# Usage (before → after):
+#   --data-path /foo                  →  data.path=/foo
+#   --training-mode peft              →  training_mode=peft
+#   --max-seq-length 256              →  data.max_seq_length=256
+#   --num-samples 10                  →  hpo.num_samples=10
+#   --search-alg optuna               →  hpo.search_alg=optuna
+#   --metric val_loss                 →  hpo.metric=val_loss
+#   --max-epochs 3                    →  hpo.max_epochs=3
+#   --max-concurrent-trials 4         →  ray.max_concurrent_trials=4
+#   --cpus-per-trial 8                →  ray.cpus_per_trial=8
+#   --gpus-per-trial 1                →  ray.gpus_per_trial=1
+#   --output-dir /out                 →  ray.output_dir=/out
+
+defaults:
+  - _self_
+  - models: default
+  - training: ft
+
+data:
+  max_seq_length: 512                     # was --max-seq-length, default=512
+  cache_dir: "${hydra:runtime.cwd}/.cache/tokenized"           # Layer 2: per-model tokenized data
+  data_cache_dir: "${hydra:runtime.cwd}/.cache/pooled"         # Layer 1: raw pooled+split cache (shared across models)
+
+  # ── Training sources (Iceberg tables, standard schema) ──
+  # All tables share the same schema: text, label, source, language, ingested_at
+  # Normalization (column mapping, label mapping) was done by DE during ETL ingestion.
+  # The ML pipeline never touches raw files — it reads pre-normalized Iceberg tables.
+  sources:                                # was --data-path (single path)
+    - name: "alespalla"
+      format: "arrow"
+      table: "ml_catalog.training.alespalla"
+      path: "${hydra:runtime.cwd}/evaluation/PromptInjection/alespalla/chatbot_instruction_prompts"
+      enabled: False
+      weight: 0
+    - name: "allenai"
+      format: "arrow"
+      table: "ml_catalog.training.allenai"
+      path: "${hydra:runtime.cwd}/evaluation/PromptInjection/allenai/wildjailbreak"
+      enabled: False
+      weight: 0
+    - name: "deepset"
+      format: "arrow"
+      table: "ml_catalog.training.deepset"
+      path: "${hydra:runtime.cwd}/evaluation/PromptInjection/deepset/prompt-injections"
+      enabled: True
+      weight: 1.0
+    - name: "HuggingFaceH4"
+      format: "arrow"
+      table: "ml_catalog.training.HuggingFaceH4"
+      path: "${hydra:runtime.cwd}/evaluation/PromptInjection/HuggingFaceH4/grok-conversation-harmless"
+      enabled: False
+      weight: 0
+    - name: "jackhhao"
+      format: "arrow"
+      table: "ml_catalog.training.jackhhao"
+      path: "${hydra:runtime.cwd}/evaluation/PromptInjection/jackhhao/jailbreak-classification"
+      enabled: True
+      weight: 1.0
+    - name: "neuralchemy"
+      format: "arrow"
+      table: "ml_catalog.training.neuralchemy"
+      path: "${hydra:runtime.cwd}/evaluation/PromptInjection/neuralchemy/Prompt-injection-dataset"
+      enabled: True
+      weight: 1.0
+    - name: "qualifire"
+      format: "arrow"
+      table: "ml_catalog.training.qualifire"
+      path: "${hydra:runtime.cwd}/evaluation/PromptInjection/qualifire/prompt-injections-benchmark"
+      enabled: False
+      weight: 0
+    - name: "samsung"
+      format: "arrow"
+      table: "ml_catalog.training.samsung"
+      path: "${hydra:runtime.cwd}/evaluation/PromptInjection/samsung/prompt_injection"
+      enabled: True
+      weight: 1.0
+    - name: "xTRam1"
+      format: "arrow"
+      table: "ml_catalog.training.xTRam1"
+      path: "${hydra:runtime.cwd}/evaluation/PromptInjection/xTRam1/safe-guard-prompt-injection"
+      enabled: False
+      weight: 0
+
+  # ── Imbalance ratio (neg:pos for training) ──
+  ratio: 20                            # null = raw distribution
+  ratio_seed: 42
+
+  # ── Splitting ──
+  splitting:
+    mode: "auto"                       # "auto" = split from pooled sources
+                                       # "manual" = use pre-built eval tables below
+
+    # Ratios (must sum to 1.0, used when mode=auto)
+    train: 0.80
+    val: 0.10
+    cal: 0.05                          # calibration set for temperature scaling
+    test: 0.05                         # held-out, touched ONCE
+
+    stratify_by: "label"               # "label", "label+language", "label+source"
+    split_seed: 99                     # separate from training seeds for stability
+
+    # Pre-built eval tables (used when mode=manual)
+    # These are NEVER resampled, NEVER re-split.
+    manual:
+      val_table: null                  # e.g. "ml_catalog.evaluation.balanced_val"
+      cal_table: null                  # e.g. "ml_catalog.evaluation.calibration"
+      test_table: null                 # e.g. "ml_catalog.evaluation.held_out_test"
+
+  # ── Iceberg connection ──
+  iceberg:
+    catalog_name: "ml_catalog"
+    catalog_type: "rest"               # "rest", "hive", "glue"
+    catalog_uri: "${oc.env:ICEBERG_CATALOG_URI,http://localhost:8181}"
+    warehouse: "s3://ml-warehouse/iceberg"
+
+mode: "search"                            # "search" or "evaluate"
+training_mode: "ft"                       # was --training-mode, choices=[ft, peft]
+
+hpo:
+  # ── Strategy ──
+  # "grid":      Pre-generate configs, cross with all seeds.
+  #              Fair comparison, clean variance, more compute.
+  #              Total trials = models × num_configs × seeds
+  #
+  # "two_phase": Phase 1: HPO with 1 seed, explore more configs.
+  #              Phase 2: Validate winner with all seeds.
+  #              More exploration per GPU-hour.
+  #              Total trials ≈ models × num_configs + seeds
+  strategy: "two_phase"
+  num_configs: 100                        # HP configs per model
+  search_alg: optuna                      # was --search-alg, choices=[random, optuna]
+  metric: "val_f1"                        # was --metric, default="val_f1"
+  max_epochs: 6                           # was --max-epochs, default=6
+  seeds: [42, 123, 456, 789, 1024, 2048, 3141, 4096, 5555, 6174]
+  phase1_seed: 42                         # two_phase only: single seed for phase 1
+  save_checkpoints: False
+
+ray:
+  output_dir: "ray_results_nano"          # was --output-dir
+  cpus_per_trial: 4                       # was --cpus-per-trial
+  gpus_per_trial: 1                       # was --gpus-per-trial
+  max_concurrent_trials: 2                # was --max-concurrent-trials
+#  workdir: "./optuna_runs"                # was --workdir
+#  ray_results_dir: "./ray_results_seed42" # was --ray-results-dir
+
+seed: 42
+final_seeds: [82, 289, 622, 906, 1536, 2594, 3618, 4825, 5864, 7777, 8888, 9999]

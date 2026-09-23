@@ -1,0 +1,17 @@
+# configs/models/minimal.yaml
+#
+# Matches the original minimal_model_set.json: 1 encoder + 1 decoder.
+# Usage: python -m src.run models=minimal hpo.num_samples=10
+
+# @package _global_
+specs:
+  bert-base-cased:
+    family: bert
+    architecture_type: encoder_only
+    peft_target_modules: [query, value]
+    enabled: true
+  "EleutherAI/pythia-70m":
+    family: pythia
+    architecture_type: decoder_only
+    peft_target_modules: [q_proj, k_proj, v_proj]
+    enabled: true

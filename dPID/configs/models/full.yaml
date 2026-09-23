@@ -1,0 +1,68 @@
+# @package _group_
+# configs/models/full.yaml
+#
+# Matches the original full_model_set.json: 1 encoder + 1 decoder.
+# Usage: python -m src.run models=full hpo.num_samples=10
+
+specs:
+  bert-base-cased:
+    family: bert
+    architecture_type: encoder_only
+    peft_target_modules: [query, value]
+    enabled: true
+  "EleutherAI/pythia-70m":
+    family: pythia
+    architecture_type: decoder_only
+    peft_target_modules: [q_proj, k_proj, v_proj]
+    enabled: true
+
+#{
+#  "encoder_only": {
+#    "google/mobilebert-uncased": {
+#      "family": "mobilebert",
+#      "peft_target_modules": ["query", "value"]
+#    },
+#    "bert-base-cased": {
+#      "family": "bert",
+#      "peft_target_modules": ["query", "value"]
+#    },
+#    "roberta-base": {
+#      "family": "roberta",
+#      "peft_target_modules": ["query", "value"]
+#    },
+#    "protectai/deberta-v3-base-prompt-injection-v2": {
+#      "family": "deberta_v3",
+#      "peft_target_modules": ["query_proj", "value_proj"]
+#    },
+#    "distilbert-base-cased": {
+#      "family": "distilbert",
+#      "peft_target_modules": ["q_lin", "v_lin"]
+#    },
+#    "google/electra-small-discriminator": {
+#      "family": "electra",
+#      "peft_target_modules": ["query", "value"]
+#    },
+#    "google/electra-base-discriminator": {
+#      "family": "electra",
+#      "peft_target_modules": ["query", "value"]
+#    },
+#    "funnel-transformer/small": {
+#      "family": "funnel",
+#      "peft_target_modules": ["query", "value"]
+#    }
+#  },
+#  "decoder_only": {
+#    "EleutherAI/pythia-70m": {
+#      "family": "pythia",
+#      "peft_target_modules": ["q_proj", "k_proj", "v_proj"]
+#    },
+#    "facebook/opt-125m": {
+#      "family": "opt",
+#      "peft_target_modules": ["q_proj", "k_proj", "v_proj"]
+#    },
+#    "HuggingFaceTB/SmolLM2-135M-Instruct": {
+#      "family": "smollm",
+#      "peft_target_modules": ["q_proj", "k_proj", "v_proj"]
+#    }
+#  }
+#}

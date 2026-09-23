@@ -1,0 +1,43 @@
+#torch==2.11.0
+# These two versions are coupled by repack_micro_batch() in
+# train_benign_exposure_mmbert2_dilute_template.py: folding
+# gradient_accumulation_steps into the per-device batch is only gradient-neutral
+# if the loss is divided by the accumulation count exactly once, which is an
+# emergent property of how Trainer and Accelerator interact. The condition moved
+# between releases - 4.51.3 has
+#   `if not model_accepts_loss_kwargs and compute_loss_func is None`
+# whereas 5.9.0 has
+#   `if (not model_accepts_loss_kwargs or num_items_in_batch is None) and ...`
+# - so it cannot be assumed. Verified empirically on 5.9.0 + accelerate 1.13.0
+# (the deployed pair), and also on 5.9.0 + 1.12.0 and 4.51.3 + 1.12.0: the same
+# effective batch gives a median relative gradient difference of 1.5e-5 (fp32
+# summation-order noise) versus 0.41 for a genuinely different effective batch.
+# In all three, Trainer leaves the division to Accelerator.backward.
+#
+# transformers 5.9.0 only requires accelerate>=1.1.0, so this pin is not forced
+# by the resolver - it records the pair the check was run against. The code does
+# not depend on it either: verify_repack_equivalence() re-runs the check at
+# startup and falls back to the unrepacked split if it ever fails.
+transformers==5.9.0
+accelerate==1.13.0
+datasets==4.8.5
+evaluate==0.4.6
+scikit-learn==1.8.0
+numpy==2.4.4
+pandas==3.0.3
+openpyxl==3.1.5
+peft==0.19.1
+optuna>=3.6,<4
+ray[tune]==2.55.1
+sentence-transformers==5.5.1
+matplotlib==3.10.9
+openai==2.38.0
+sentencepiece==0.2.1
+hydra-core==1.3.2
+pyiceberg==0.11.1
+tabulate==0.10.0
+onnxruntime>=1.16.0
+onnx>=1.14.0
+onnxscript>=0.1.0
+torchao==0.17.0
+scipy==1.17.1

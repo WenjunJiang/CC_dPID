@@ -1,0 +1,78 @@
+# configs/data_split_config.yaml
+#
+# Configuration for splitting datasets into train/val/cal/test sets
+# for prompt injection detection model training.
+#
+# Usage:
+#   python split_dataset.py
+#   python split_dataset.py seed=123
+#   python split_dataset.py output_dir=my_output
+#
+
+# Hydra defaults
+defaults:
+  - _self_
+
+# Balanced datasets (contain both malicious and benign samples)
+# These will be split into M_* (malicious) and B_core_* (benign from balanced)
+balanced_dataset_list:
+  - name: "samsung/dqi"
+    path: "evaluation/PromptInjection/samsung/dqi"
+
+# Benign datasets (extract only benign samples for extra benign data)
+# These will contribute to B_extra_* and B_mining sets
+benign_dataset_list:
+  - name: "Atmanstr/MultiDomain_Instruction"
+    path: "evaluation/PromptInjection/Atmanstr/MultiDomain_Instruction"
+  - name: "eddforsure/QueryLLM"
+    path: "evaluation/PromptInjection/eddforsure/QueryLLM"
+  - name: "guychuk/benign-malicious-prompt-classification"
+    path: "evaluation/PromptInjection/guychuk/benign-malicious-prompt-classification"
+  - name: "nandhak12/finguard-finance-injection-dataset"
+    path: "evaluation/PromptInjection/nandhak12/finguard-finance-injection-dataset"
+  - name: "yassiracharki/Yahoo_Answers_10_categories_for_NLP"
+    path: "evaluation/PromptInjection/yassiracharki/Yahoo_Answers_10_categories_for_NLP"
+
+# Split ratios for balanced data (must sum to 1.0)
+split_ratios:
+  train: 0.70
+  val: 0.10
+  cal: 0.10
+  test: 0.10
+
+# Benign allocation ratios (relative to malicious counts)
+# Priority order: val -> cal -> test -> train -> mining
+benign_allocation:
+  val_ratio: 50          # B_extra_val = len(M_val) * 50 (1:50 ratio)
+  cal_ratio: 500        # B_extra_cal = len(M_cal) * 1000 (1:1000 ratio)
+  test_ratio: 500       # B_extra_test = len(M_test) * 1000 (1:1000 ratio)
+  train_multiplier: 10   # B_extra_train = len(M_train) * 10
+  mining_multiplier: 20  # B_mining = len(M_train) * 20
+
+# Random seed for reproducibility
+seed: 42
+
+# Output directory (splits will be saved to {output_dir}/{seed}/)
+output_dir: "data_split"
+
+# Additional malicious datasets to add to M_train
+# These datasets will be loaded from evaluation/PromptInjection/
+# and only malicious samples (label=True/1) will be added to M_train
+additional_malicious_dataset_list:
+  - name: "samsung/prompt_injection"
+    path: "evaluation/PromptInjection/samsung/prompt_injection"
+  - name: "deepset/prompt-injections"
+    path: "evaluation/PromptInjection/deepset/prompt-injections"
+  - name: "jackhhao/jailbreak-classification"
+    path: "evaluation/PromptInjection/jackhhao/jailbreak-classification"
+  - name: "neuralchemy/Prompt-injection-dataset"
+    path: "evaluation/PromptInjection/neuralchemy/Prompt-injection-dataset"
+
+# Inference configuration for filtering malicious data by inference score
+# Used by add_malicious_data_with_inference.py
+inference:
+  calibration_path: "experiments/benign_exposure_asl_10_1_051726/benign_exposure_results_seed42/best_model/distilbert-base-multilingual-cased/calibration.json"
+  model: "distilbert-base-multilingual-cased"
+  inference_score_threshold: 0.9
+  batch_size: 32
+  sequence_length: 512

@@ -1,0 +1,34 @@
+# Six-form email augmentation; inherit the existing LoRA and QAT settings.
+# Entry point: train_benign_exposure_mmbert2_dilute_email.py
+base_config: peft_benign_exposure_mmbert2_template.yaml
+
+ray:
+  output_dir: "benign_exposure_peft_mmbert2_email_seed${data.seed}"
+
+hpo:
+  skip: false
+  checkpoint_path: "${ray.output_dir}/checkpoints/hpo_complete.json"
+
+email:
+  enabled: true
+  dataset_name: "LLM-PBE/enron-email"
+  revision: "main"
+  source_split: "train"
+  text_key: "text"
+  cache_dir: "email_data_cache"
+  artifacts_dir: "${ray.output_dir}/email_augmentation"
+  split_ratios:
+    train: 0.70
+    valid: 0.10
+    calib: 0.10
+    test: 0.10
+  # Order: payload, template_payload, email_payload,
+  # template_email_payload, email, template_email.
+  # Payload : template_payload : (email_payload + template_email_payload) = 1:1:1.
+  weights:
+    malicious: [0.3333333333333333, 0.3333333333333333, 0.16666666666666666, 0.16666666666666666, 0.0, 0.0]
+    benign: [0.30, 0.30, 0.15, 0.15, 0.05, 0.05]
+
+template:
+  enabled: true
+  max_length: ${data.max_seq_length}

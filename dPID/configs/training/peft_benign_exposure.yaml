@@ -1,0 +1,77 @@
+# configs/training/peft_benign_exposure.yaml
+# Phase 1 training with benign exposure optimization using PEFT (LoRA)
+#
+# This configuration extends the standard peft.yaml with benign exposure sampling.
+# The training data is sampled with a configurable benign:malicious ratio to
+# optimize the model's exposure to benign samples during training.
+#
+# Usage:
+#   python train_benign_exposure.py configs/training/peft_benign_exposure.yaml
+#   python train_benign_exposure.py data.seed=123
+#   python train_benign_exposure.py hpo.num_samples=100
+
+defaults:
+  - _self_
+
+# Data paths (output from split_dataset.py)
+data:
+  split_dir: "data_split"
+  seed: 42
+  max_seq_length: 512
+
+# Validation set ratio (fixed 1:50)
+validation:
+  benign_per_malicious: 50
+
+# Calibration settings
+calibration:
+  beta: 1                    # F-beta parameter for threshold optimization
+  temp_ratio: 10             # 10:1 for temperature scaling
+  threshold_ratio: 500       # 500:1 for threshold optimization
+
+# Test settings  
+test:
+  benign_per_malicious: 500  # 500:1 for test set (deployment-like)
+
+# Ray Tune settings
+hpo:
+  num_samples: 30
+  max_epochs: 6
+  metric: "val_f1"
+  mode: "max"
+  search_alg: "optuna"
+  cpus_per_trial: 5
+  gpus_per_trial: 0.4
+  max_concurrent_trials: 1
+
+# Output (includes seed to prevent overwriting results from different seeds)
+ray:
+  output_dir: "benign_exposure_peft_results_seed${data.seed}"
+
+# Training config with PEFT search space and benign exposure sampling
+training:
+  mode: "peft"
+  search_space:
+    # ── Standard hyperparameters ──
+    classifier_dropout:           {type: uniform,     low: 0.0,   high: 0.5}
+    learning_rate:                {type: loguniform,  low: 1e-5,  high: 1e-3}
+    weight_decay:                 {type: uniform,     low: 0.0,   high: 0.1}
+    per_device_train_batch_size:  {type: choice,      values: [8, 16, 32]}
+    num_train_epochs:             {type: randint,     low: 1,     high: 6}
+    gradient_accumulation_steps:  {type: choice,      values: [1, 2, 4]}
+    warmup_ratio:                 {type: uniform,     low: 0.0,   high: 0.2}
+
+    # ── LoRA hyperparameters ──
+    lora_r:                       {type: choice,      values: [4, 8, 16, 32, 64]}
+    lora_alpha:                   {type: choice,      values: [8, 16, 32, 64]}
+    lora_dropout:                 {type: choice,      values: [0.0, 0.1, 0.2, 0.3]}
+
+    # ── Benign exposure sampling parameter ──
+    # Benign data is 1x, 2x, 3x, 5x, or 10x the size of malicious data
+    benign_to_malicious_ratio:    {type: choice,      values: [1, 2, 3, 5, 10]}
+
+    # ── ASL Loss hyperparameters ──
+    # Asymmetric Loss for imbalanced classification
+    gamma_pos:                    {type: choice,      values: [0.0, 0.5, 1.0]}
+    gamma_neg:                    {type: choice,      values: [0.5, 1.0, 1.5, 2.0]}
+    asl_clip:                     {type: choice,      values: [0.0, 0.01, 0.02]}
