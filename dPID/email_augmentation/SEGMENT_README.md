@@ -151,6 +151,15 @@ loss = ASL_w(sequence_logit, label)
   reweights the sequence loss back to the `benign_to_malicious_ratio` prior via
   `stratified_prior_ratio`, so the objective is unchanged in expectation.
   Evaluation and calibration use the unweighted mean.
+- `email.first_letter_upper_probability` (0.5 in this config) redraws the case
+  of each payload's first letter at insertion, with the same probability for
+  both labels. Injection sources tend to start lower-case ("ignore ...") and
+  benign text capitalized, so without it the first letter predicts the label
+  and `ignore` -> `Ignore` flips a detection. It applies to every collator the
+  training script builds (train, valid, calib, test); the separately
+  materialized held-out test splits keep payloads verbatim. Remove the key to
+  restore verbatim insertion. `payload_surface_stats.py` measures the bias on
+  a split directory.
 - The source dataset has payload-level labels, not finer attack spans: the
   inserted payload boundary defines the positive region. Common words inside it
   are **not** forced individually to be malicious. Masks use tokenizer character

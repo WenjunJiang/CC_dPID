@@ -53,8 +53,12 @@ TEMPLATES = ["Summarize the following text : {PAYLOAD} end",
              "{PAYLOAD}"]
 
 
-def make_tokenizer():
-    vocab = {token: i for i, token in enumerate(SPECIALS + FILLER + ATTACK + TEMPLATE_WORDS)}
+def make_tokenizer(cased=False):
+    """`cased` adds a capitalized form of every word, as a cased subword vocabulary has."""
+    words = SPECIALS + FILLER + ATTACK + TEMPLATE_WORDS
+    if cased:
+        words = list(dict.fromkeys(words + [w.capitalize() for w in FILLER + ATTACK]))
+    vocab = {token: i for i, token in enumerate(words)}
     backend = Tokenizer(models.WordLevel(vocab=vocab, unk_token="[UNK]"))
     backend.pre_tokenizer = pre_tokenizers.WhitespaceSplit()
     backend.post_processor = processors.TemplateProcessing(
@@ -105,9 +109,44 @@ def email_pool(n, seed):
         for i in range(n)])
 
 
-def make_collator(tokenizer, split, mode, seed, weights, artifacts_dir=None):
+def make_collator(tokenizer, split, mode, seed, weights, artifacts_dir=None,
+                  first_letter_upper_probability=None):
     from email_augmentation import EmailAugmentationCollator
+    extra = ({} if first_letter_upper_probability is None
+             else {"first_letter_upper_probability": first_letter_upper_probability})
     return EmailAugmentationCollator(
         tokenizer=tokenizer, email_pool=email_pool(40, seed), templates=TEMPLATES, split=split,
         mode=mode, seed=seed, max_length=512, weights=weights, artifacts_dir=artifacts_dir,
-        region_supervision=True)
+        region_supervision=True, **extra)
+
+
+# Payloads whose first-letter case depends on the label, as when injections
+# come from sources that start them "ignore ..." and benign text is ordinary
+# capitalized prose. Content is kept weak on purpose so that the case of the
+# first word is the cheapest cue available, which is when a model takes it.
+OPENERS = ["ignore", "disregard", "override", "bypass", "reveal"]
+
+
+def _cased(word, upper):
+    return word.capitalize() if upper else word.lower()
+
+
+def cased_payload_split(n_malicious, n_benign, seed, malicious_upper=0.05, benign_upper=0.9,
+                        lengths=(8, 40)):
+    rng = random.Random(seed)
+
+    def body(length, density):
+        return [rng.choice(ATTACK).lower() if rng.random() < density else rng.choice(FILLER)
+                for _ in range(length - 1)]
+
+    malicious = [dict(text=" ".join([_cased(rng.choice(OPENERS), rng.random() < malicious_upper)]
+                                    + body(rng.randint(*lengths), 0.15)),
+                      label=1, id=f"m{seed}_{i}") for i in range(n_malicious)]
+    benign = []
+    for i in range(n_benign):
+        # Benign text sometimes opens with the same verbs ("Ignore the noise ...").
+        opener = rng.choice(OPENERS) if rng.random() < 0.1 else rng.choice(FILLER)
+        benign.append(dict(text=" ".join([_cased(opener, rng.random() < benign_upper)]
+                                         + body(rng.randint(*lengths), 0.05)),
+                           label=0, id=f"b{seed}_{i}"))
+    return Dataset.from_list(malicious), Dataset.from_list(benign)

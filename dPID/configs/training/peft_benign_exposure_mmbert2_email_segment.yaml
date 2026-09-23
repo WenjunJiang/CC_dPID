@@ -63,6 +63,10 @@ perf:
 email:
   enabled: true
   region_supervision: true
+  # Case of each payload's first letter is redrawn at insertion, with the same
+  # probability for both labels, so it cannot act as a label shortcut. Remove
+  # the key to insert payloads verbatim.
+  first_letter_upper_probability: 0.5
   dataset_name: LLM-PBE/enron-email
   revision: main
   source_split: train

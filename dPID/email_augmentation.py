@@ -31,6 +31,25 @@ SPLITS = ("train", "valid", "calib", "test")
 ALGORITHM_VERSION = 1
 
 
+_FIRST_LETTER = re.compile(r"[^\W\d_]")
+
+
+def set_first_letter_case(text: str, upper: bool) -> str:
+    """Upper- or lower-case the first letter of `text` without changing its length.
+
+    Letters whose case mapping changes length (German sharp s) are left alone so
+    that character offsets, and therefore span masks, stay valid.
+    """
+    match = _FIRST_LETTER.search(text)
+    if match is None:
+        return text
+    char = match.group()
+    replaced = char.upper() if upper else char.lower()
+    if len(replaced) != 1:
+        return text
+    return text[:match.start()] + replaced + text[match.end():]
+
+
 def _digest(value: Any) -> str:
     return hashlib.sha256(
         json.dumps(value, sort_keys=True, ensure_ascii=False).encode("utf-8")
@@ -136,6 +155,9 @@ class EmailAugmentationCollator:
     weights: dict = field(default_factory=lambda: dict(DEFAULT_WEIGHTS))
     artifacts_dir: str | None = None
     region_supervision: bool = False
+    # Probability that a payload is inserted with an upper-case first letter,
+    # drawn independently of the label. None keeps payloads verbatim.
+    first_letter_upper_probability: float | None = None
 
     def __post_init__(self):
         if self.mode not in ("random", "fixed") or self.split not in SPLITS:
@@ -176,6 +198,12 @@ class EmailAugmentationCollator:
         if self.region_supervision:
             # Do not reuse legacy fixed views that contain no region masks.
             self.signature = _digest([self.signature, "segment_region_masks_v1"])
+        if self.first_letter_upper_probability is not None:
+            p = float(self.first_letter_upper_probability)
+            if not 0.0 <= p <= 1.0:
+                raise ValueError("first_letter_upper_probability must lie in [0, 1]")
+            self.first_letter_upper_probability = p
+            self.signature = _digest([self.signature, "first_letter_case_v1", p])
 
     def _encode(self, text: str) -> list[int]:
         # Encode the actual final string, including the tokenizer's special tokens.
@@ -190,7 +218,17 @@ class EmailAugmentationCollator:
     def filter_payloads(self, dataset: Dataset) -> Dataset:
         """Exclude unusable payloads before class-budget sampling, without relabeling."""
         def eligible(batch):
+            if self.first_letter_upper_probability is None:
+                return eligible_as_written(batch[self.text_key])
+            # Either case may be drawn at composition time, so both must fit.
             texts = batch[self.text_key]
+            return [a and b for a, b in zip(
+                eligible_as_written([set_first_letter_case(t, True) if isinstance(t, str) else t
+                                     for t in texts]),
+                eligible_as_written([set_first_letter_case(t, False) if isinstance(t, str) else t
+                                     for t in texts]))]
+
+        def eligible_as_written(texts):
             valid = [isinstance(text, str) and bool(text.strip()) for text in texts]
             safe = [text if ok else " " for text, ok in zip(texts, valid)]
             raw = self.tokenizer(
@@ -259,6 +297,15 @@ class EmailAugmentationCollator:
         has_email = "email" in form
         has_template = form.startswith("template_")
         payload = feature[self.text_key] if has_payload else ""
+        payload_case = ""
+        if has_payload and self.first_letter_upper_probability is not None and isinstance(payload, str):
+            # Payload sources differ in how they capitalize, and the difference
+            # correlates with the label: an injection that starts "ignore ..."
+            # inserted as its own paragraph looks unlike a benign sentence. The
+            # same draw for both labels makes the first letter carry no label.
+            upper = rng.random() < self.first_letter_upper_probability
+            payload = set_first_letter_case(payload, upper)
+            payload_case = "upper" if upper else "lower"
         if has_payload and (not isinstance(payload, str) or not payload.strip() or not self._fits(payload)):
             raise ValueError("Payload is empty or exceeds max_length; call filter_payloads before sampling")
 
@@ -337,6 +384,8 @@ class EmailAugmentationCollator:
             "requested_position": requested_position, "position": position,
             "email_words_retained": low,
         }
+        if self.first_letter_upper_probability is not None:
+            result["payload_first_letter"] = payload_case
         if self.region_supervision:
             final_text, start, end = render_parts(low)
             if final_text != text:
@@ -413,4 +462,5 @@ def make_email_collator(tokenizer, pools, email_cfg, template_cfg, split, seed, 
         weights={key: list(email_cfg.get("weights", DEFAULT_WEIGHTS)[key]) for key in DEFAULT_WEIGHTS},
         artifacts_dir=str(email_cfg.artifacts_dir),
         region_supervision=bool(email_cfg.get("region_supervision", False)),
+        first_letter_upper_probability=email_cfg.get("first_letter_upper_probability", None),
     )

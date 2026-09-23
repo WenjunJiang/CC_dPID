@@ -4,3 +4,4 @@
 __pycache__/
 experiments/run*.log
 experiments/ab_real_stack/*.log
+experiments/first_letter_case/*.log
