@@ -1,8 +1,8 @@
 """How strongly does a payload's surface form predict its label?
 
 Reads the 16-file split directly and reports, per class, the share of payloads
-whose first letter is lower-case, whose first letter is upper-case, and which
-end without sentence punctuation. Any feature whose share differs a lot
+by first-letter case, final punctuation, leading/trailing whitespace, and
+internal line breaks. Any feature whose share differs a lot
 between M_* and B_* is a shortcut the model can learn instead of the content.
 
     python payload_surface_stats.py data_split3 42
@@ -25,6 +25,9 @@ def surface(text):
         "first_letter_lower": letter.islower(),
         "first_letter_upper": letter.isupper(),
         "no_final_punctuation": bool(stripped) and stripped[-1] not in ".!?。！？\"')]",
+        "leading_whitespace": text[:1].isspace(),
+        "trailing_whitespace": text[-1:].isspace(),
+        "contains_newline": "\n" in text.strip(),
     }
 
 

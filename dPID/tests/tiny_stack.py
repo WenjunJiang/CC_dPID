@@ -35,7 +35,7 @@ if "template_dilution_collator" not in sys.modules:
 
 import torch  # noqa: E402
 from datasets import Dataset  # noqa: E402
-from tokenizers import Tokenizer, models, pre_tokenizers, processors  # noqa: E402
+from tokenizers import Regex, Tokenizer, models, pre_tokenizers, processors  # noqa: E402
 from transformers import (ModernBertConfig, ModernBertForSequenceClassification,  # noqa: E402
                           PreTrainedTokenizerFast)
 
@@ -53,14 +53,23 @@ TEMPLATES = ["Summarize the following text : {PAYLOAD} end",
              "{PAYLOAD}"]
 
 
-def make_tokenizer(cased=False):
-    """`cased` adds a capitalized form of every word, as a cased subword vocabulary has."""
+def make_tokenizer(cased=False, newlines=False):
+    """`cased` adds a capitalized form of every word, as a cased subword vocabulary has.
+
+    `newlines` keeps each line break as its own token, as real subword
+    tokenizers do, so a paragraph break and a space are distinguishable.
+    """
     words = SPECIALS + FILLER + ATTACK + TEMPLATE_WORDS
     if cased:
         words = list(dict.fromkeys(words + [w.capitalize() for w in FILLER + ATTACK]))
+    if newlines:
+        words = words + ["\n"]
     vocab = {token: i for i, token in enumerate(words)}
     backend = Tokenizer(models.WordLevel(vocab=vocab, unk_token="[UNK]"))
-    backend.pre_tokenizer = pre_tokenizers.WhitespaceSplit()
+    backend.pre_tokenizer = (
+        pre_tokenizers.Sequence([pre_tokenizers.Split(Regex(r"[^\S\n]+"), behavior="removed"),
+                                 pre_tokenizers.Split(Regex(r"\n"), behavior="isolated")])
+        if newlines else pre_tokenizers.WhitespaceSplit())
     backend.post_processor = processors.TemplateProcessing(
         single="[CLS] $A [SEP]", special_tokens=[("[CLS]", vocab["[CLS]"]), ("[SEP]", vocab["[SEP]"])])
     return PreTrainedTokenizerFast(tokenizer_object=backend, pad_token="[PAD]", unk_token="[UNK]",
@@ -109,11 +118,10 @@ def email_pool(n, seed):
         for i in range(n)])
 
 
-def make_collator(tokenizer, split, mode, seed, weights, artifacts_dir=None,
-                  first_letter_upper_probability=None):
+def make_collator(tokenizer, split, mode, seed, weights, artifacts_dir=None, **options):
+    """`options` are the payload-surface fields; omitted ones keep the defaults."""
     from email_augmentation import EmailAugmentationCollator
-    extra = ({} if first_letter_upper_probability is None
-             else {"first_letter_upper_probability": first_letter_upper_probability})
+    extra = {k: v for k, v in options.items() if v is not None}
     return EmailAugmentationCollator(
         tokenizer=tokenizer, email_pool=email_pool(40, seed), templates=TEMPLATES, split=split,
         mode=mode, seed=seed, max_length=512, weights=weights, artifacts_dir=artifacts_dir,
@@ -132,7 +140,7 @@ def _cased(word, upper):
 
 
 def cased_payload_split(n_malicious, n_benign, seed, malicious_upper=0.05, benign_upper=0.9,
-                        lengths=(8, 40)):
+                        lengths=(8, 40), malicious_density=0.15, benign_density=0.05):
     rng = random.Random(seed)
 
     def body(length, density):
@@ -140,13 +148,13 @@ def cased_payload_split(n_malicious, n_benign, seed, malicious_upper=0.05, benig
                 for _ in range(length - 1)]
 
     malicious = [dict(text=" ".join([_cased(rng.choice(OPENERS), rng.random() < malicious_upper)]
-                                    + body(rng.randint(*lengths), 0.15)),
+                                    + body(rng.randint(*lengths), malicious_density)),
                       label=1, id=f"m{seed}_{i}") for i in range(n_malicious)]
     benign = []
     for i in range(n_benign):
         # Benign text sometimes opens with the same verbs ("Ignore the noise ...").
         opener = rng.choice(OPENERS) if rng.random() < 0.1 else rng.choice(FILLER)
         benign.append(dict(text=" ".join([_cased(opener, rng.random() < benign_upper)]
-                                         + body(rng.randint(*lengths), 0.05)),
+                                         + body(rng.randint(*lengths), benign_density)),
                            label=0, id=f"b{seed}_{i}"))
     return Dataset.from_list(malicious), Dataset.from_list(benign)

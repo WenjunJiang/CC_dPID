@@ -67,6 +67,12 @@ email:
   # probability for both labels, so it cannot act as a label shortcut. Remove
   # the key to insert payloads verbatim.
   first_letter_upper_probability: 0.5
+  # Payload edges are stripped, and the separator between email and payload is
+  # drawn uniformly from these for both labels: a paragraph break, a line
+  # break, or a single space (an injection written into a running sentence).
+  # Remove either key to restore the verbatim payload and the fixed "\n\n".
+  strip_payload_whitespace: true
+  insertion_separators: ["\n\n", "\n", " "]
   dataset_name: LLM-PBE/enron-email
   revision: main
   source_split: train

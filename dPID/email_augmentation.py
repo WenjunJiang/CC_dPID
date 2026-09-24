@@ -158,6 +158,14 @@ class EmailAugmentationCollator:
     # Probability that a payload is inserted with an upper-case first letter,
     # drawn independently of the label. None keeps payloads verbatim.
     first_letter_upper_probability: float | None = None
+    # Strip each payload's leading and trailing whitespace before insertion.
+    # Sources differ in how they end a payload (a trailing newline, a leading
+    # space), which is another surface cue that can follow the label.
+    strip_payload_whitespace: bool = False
+    # Separators between an email and an inserted payload, drawn uniformly and
+    # independently of the label. None keeps the paragraph break "\n\n" alone,
+    # which never shows the model an injection written into a running sentence.
+    insertion_separators: list[str] | None = None
 
     def __post_init__(self):
         if self.mode not in ("random", "fixed") or self.split not in SPLITS:
@@ -204,6 +212,14 @@ class EmailAugmentationCollator:
                 raise ValueError("first_letter_upper_probability must lie in [0, 1]")
             self.first_letter_upper_probability = p
             self.signature = _digest([self.signature, "first_letter_case_v1", p])
+        if self.strip_payload_whitespace:
+            self.signature = _digest([self.signature, "strip_payload_whitespace_v1"])
+        if self.insertion_separators is not None:
+            separators = [str(s) for s in self.insertion_separators]
+            if not separators or any(not s or s.strip() for s in separators):
+                raise ValueError("insertion_separators must be non-empty whitespace strings")
+            self.insertion_separators = separators
+            self.signature = _digest([self.signature, "insertion_separators_v1", separators])
 
     def _encode(self, text: str) -> list[int]:
         # Encode the actual final string, including the tokenizer's special tokens.
@@ -298,6 +314,9 @@ class EmailAugmentationCollator:
         has_template = form.startswith("template_")
         payload = feature[self.text_key] if has_payload else ""
         payload_case = ""
+        if has_payload and self.strip_payload_whitespace and isinstance(payload, str):
+            # Only ever shortens the payload, so filter_payloads stays valid.
+            payload = payload.strip()
         if has_payload and self.first_letter_upper_probability is not None and isinstance(payload, str):
             # Payload sources differ in how they capitalize, and the difference
             # correlates with the label: an injection that starts "ignore ..."
@@ -322,6 +341,7 @@ class EmailAugmentationCollator:
                 raise ValueError("No template fits the complete payload within max_length")
 
         left = right = ""
+        separator = "\n\n"
         email_id, requested_position, position = "", "none", "none"
         if has_email:
             email = self.email_pool[rng.randrange(len(self.email_pool))]
@@ -331,6 +351,8 @@ class EmailAugmentationCollator:
             if has_payload:
                 requested_position = rng.choice(("start", "end", "random"))
                 left, right, position = self._insert_parts(body, requested_position, rng)
+                if self.insertion_separators is not None:
+                    separator = rng.choice(self.insertion_separators)
             else:
                 right = body
 
@@ -347,9 +369,9 @@ class EmailAugmentationCollator:
             n_left = min(max_left, word_budget - n_right)
             before = left[left_words[-n_left].start():].rstrip() if n_left else ""
             after = right[:right_words[n_right - 1].end()].lstrip() if n_right else ""
-            content = "\n\n".join(part for part in (before, payload, after) if part)
+            content = separator.join(part for part in (before, payload, after) if part)
             prefix, suffix = template.split(self.placeholder)
-            start = len(prefix) + (len(before) + 2 if before and payload else 0)
+            start = len(prefix) + (len(before) + len(separator) if before and payload else 0)
             return prefix + content + suffix, start, start + len(payload)
 
         def render(word_budget: int) -> str:
@@ -386,6 +408,8 @@ class EmailAugmentationCollator:
         }
         if self.first_letter_upper_probability is not None:
             result["payload_first_letter"] = payload_case
+        if self.insertion_separators is not None:
+            result["separator"] = separator if has_email and has_payload else ""
         if self.region_supervision:
             final_text, start, end = render_parts(low)
             if final_text != text:
@@ -463,4 +487,7 @@ def make_email_collator(tokenizer, pools, email_cfg, template_cfg, split, seed, 
         artifacts_dir=str(email_cfg.artifacts_dir),
         region_supervision=bool(email_cfg.get("region_supervision", False)),
         first_letter_upper_probability=email_cfg.get("first_letter_upper_probability", None),
+        strip_payload_whitespace=bool(email_cfg.get("strip_payload_whitespace", False)),
+        insertion_separators=(list(email_cfg.insertion_separators)
+                              if email_cfg.get("insertion_separators", None) is not None else None),
     )

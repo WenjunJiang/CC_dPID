@@ -160,6 +160,16 @@ loss = ASL_w(sequence_logit, label)
   materialized held-out test splits keep payloads verbatim. Remove the key to
   restore verbatim insertion. `payload_surface_stats.py` measures the bias on
   a split directory.
+- `email.strip_payload_whitespace` strips each payload's leading and trailing
+  whitespace before insertion, for both labels, since sources differ in how
+  they end a payload. `email.insertion_separators` (here `"\n\n"`, `"\n"`,
+  `" "`) is drawn uniformly per email+payload sample, independently of the
+  label; before, every payload was forced into its own paragraph with `"\n\n"`,
+  even at a mid-sentence insertion point, so an injection written into a
+  running sentence was never seen in training. The span start accounts for
+  the drawn separator's length. Insertion positions are unchanged: `start`,
+  `end`, or `random`, where `random` is any whitespace between two words of
+  the email, not specifically a line break or sentence end.
 - The source dataset has payload-level labels, not finer attack spans: the
   inserted payload boundary defines the positive region. Common words inside it
   are **not** forced individually to be malicious. Masks use tokenizer character
