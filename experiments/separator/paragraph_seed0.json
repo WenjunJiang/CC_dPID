@@ -1,0 +1,16 @@
+{
+  "arm": "paragraph",
+  "seed": 0,
+  "epochs": 8,
+  "threshold_at_1pct_fpr": -0.04098177328705788,
+  "n_inserted_malicious": 60,
+  "n_inserted_benign": 1484,
+  "recall_paragraph": 0.6666666666666666,
+  "recall_inline": 0.6833333333333333,
+  "fpr_paragraph": 0.012803234501347708,
+  "fpr_inline": 0.011455525606469003,
+  "pr_auc_paragraph": 0.5611912073847103,
+  "pr_auc_inline": 0.5758513487412446,
+  "malicious_margin_shift": -0.03738492354750633,
+  "benign_margin_shift": -0.022620216012001038
+}

@@ -1,0 +1,16 @@
+{
+  "arm": "mixed",
+  "seed": 0,
+  "epochs": 8,
+  "threshold_at_1pct_fpr": 0.15510915219783783,
+  "n_inserted_malicious": 60,
+  "n_inserted_benign": 1484,
+  "recall_paragraph": 0.7166666666666667,
+  "recall_inline": 0.7166666666666667,
+  "fpr_paragraph": 0.014150943396226415,
+  "fpr_inline": 0.014824797843665768,
+  "pr_auc_paragraph": 0.5427591449442126,
+  "pr_auc_inline": 0.5145338121122645,
+  "malicious_margin_shift": 0.004848659038543701,
+  "benign_margin_shift": -0.009195206686854362
+}
