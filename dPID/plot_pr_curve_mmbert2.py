@@ -402,6 +402,21 @@ def run_inference(
     # Run prediction
     print(f"  Running prediction on {len(test_ds_tokenized)} samples...")
     logits, labels = _extract_predictions(trainer, test_ds_tokenized, "test")
+
+    # text/label/source come from test_ds_cleaned, logits from test_ds_tokenized,
+    # and Dataset.from_dict below pairs them by position. Verify the pairing
+    # instead of assuming tokenize_dataset kept every row in order: the labels
+    # the model was scored with must equal the labels written next to the text.
+    if len(test_ds_tokenized) != len(original_texts):
+        raise RuntimeError(f"tokenize_dataset changed the row count: "
+                           f"{len(original_texts)} -> {len(test_ds_tokenized)}")
+    if labels is not None and not np.array_equal(
+            np.asarray(labels).reshape(-1).astype(int), np.asarray(original_labels).astype(int)):
+        raise RuntimeError("Scores and texts are misaligned: the labels Trainer scored "
+                           "differ from the labels saved beside each text")
+    if "text" in test_ds_tokenized.column_names and list(test_ds_tokenized["text"]) != list(original_texts):
+        raise RuntimeError("Scores and texts are misaligned: tokenize_dataset reordered or "
+                           "altered the text column")
     
     # Get logits for positive class (class 1)
     logits_pos = logits[:, 1]
