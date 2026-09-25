@@ -16,6 +16,7 @@ Usage:
 """
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -139,6 +140,68 @@ def apply_training_mode(mode: str, suffix: str = "") -> None:
         OUTPUT_DIR = f"inference_results_seed{SEED}{tag}"
     if "PR_CURVE_PATH" not in os.environ:
         PR_CURVE_PATH = f"pr_curve_seed{SEED}{tag}.png"
+
+
+# =============================================================================
+# Provenance of saved inference results
+#
+# main() reuses OUTPUT_DIR instead of re-running inference whenever it exists.
+# The saved dataset records scores but not which model produced them, so
+# pointing PR_MODEL_PATH at a new checkpoint while PR_OUTPUT_DIR still names an
+# old run replots the old model's scores under the new model's name. The
+# manifest below makes the reuse conditional on the same checkpoint files,
+# calibration, data and test construction.
+# =============================================================================
+
+MANIFEST_NAME = "inference_manifest.json"
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def inference_identity(model_path: str, training_mode: str, split_dir: str) -> dict:
+    """Everything that determines the saved scores, with checkpoint file hashes."""
+    root = Path(model_path).resolve()
+    files = [root / "config.json", root / "calibration.json", *root.glob("*.safetensors"),
+             *root.glob("*.bin"), *(root / "adapter").glob("*")]
+    return {
+        "model_path": str(root),
+        "training_mode": training_mode,
+        "data_split_dir": str(Path(split_dir).resolve()),
+        "test_ratio": TEST_RATIO,
+        "seed": SEED,
+        "max_seq_length": MAX_SEQ_LENGTH,
+        "files": {str(f.relative_to(root)): _sha256(f) for f in sorted(files) if f.is_file()},
+    }
+
+
+def check_reusable(output_path: Path, expected: dict) -> None:
+    """Refuse saved results that another model, calibration or test set produced."""
+    manifest = output_path / MANIFEST_NAME
+    remedy = (f"Delete {output_path} to re-run inference, or set PR_OUTPUT_DIR "
+              f"to a new directory for this model.")
+    if not manifest.exists():
+        raise RuntimeError(
+            f"{output_path} holds inference results with no record of the model that "
+            f"produced them, so they may belong to a different checkpoint. {remedy}")
+    saved = json.loads(manifest.read_text())
+    differing = sorted(key for key in set(saved) | set(expected) if saved.get(key) != expected.get(key))
+    if differing:
+        lines = []
+        for key in differing:
+            if key == "files":
+                old, new = saved.get("files", {}), expected.get("files", {})
+                changed = sorted(n for n in set(old) | set(new) if old.get(n) != new.get(n))
+                lines.append(f"    files changed: {changed}")
+            else:
+                lines.append(f"    {key}: saved {saved.get(key)!r}, now {expected.get(key)!r}")
+        raise RuntimeError(
+            f"{output_path} was produced by a different run:\n" + "\n".join(lines) + f"\n  {remedy}")
 
 
 # =============================================================================
@@ -370,6 +433,8 @@ def run_inference(
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
     results.save_to_disk(str(output_path))
+    (output_path / MANIFEST_NAME).write_text(
+        json.dumps(inference_identity(model_path, training_mode, DATA_SPLIT_DIR), indent=2) + "\n")
     print(f"  Results saved to: {output_path}")
     print(f"  Total samples: {len(results)}")
     
@@ -643,6 +708,7 @@ def main():
 
     if output_path.exists():
         print(f"  Loading existing inference results from: {output_path}")
+        check_reusable(output_path, inference_identity(MODEL_PATH, TRAINING_MODE, DATA_SPLIT_DIR))
         results = load_from_disk(str(output_path))
         print(f"  Loaded {len(results)} samples")
     else:
