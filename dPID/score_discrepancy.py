@@ -6,7 +6,7 @@ differ, and prints raw margins so calibration cannot hide a model difference:
   alone          one text, no padding (what predict_prompt.py does)
   batched        the same text inside a padded batch of longer texts
   variants       leading/trailing whitespace, newline, first-letter case
-  saved          the margin/prob the evaluation run wrote, if --outputs is given
+  saved          what the evaluation run wrote (its HF dataset: logit = margin, prob)
 
 If "alone" and "batched" differ, padding changes the score. If only "saved"
 differs, the evaluation run scored a different text, a different checkpoint,
@@ -29,8 +29,19 @@ FILLER = ("Please review the attached quarterly report and send me your comments
 
 
 def saved_rows(directory, text):
-    """Rows mentioning the text in any CSV/JSON/JSONL the evaluation wrote."""
-    for path in sorted(Path(directory).rglob("*")):
+    """Rows holding the text: the saved HF dataset first, then any CSV/JSON/JSONL."""
+    directory = Path(directory)
+    if (directory / "state.json").exists():
+        from datasets import load_from_disk
+        dataset = load_from_disk(str(directory))
+        for index, value in enumerate(dataset["text"]):
+            if isinstance(value, str) and text in value:
+                row = dataset[index]
+                yield directory, {k: row[k] for k in row if k != "text"} | {"text": value}
+    manifest = directory / "inference_manifest.json"
+    if manifest.exists():
+        yield manifest, manifest.read_text()[:400]
+    for path in sorted(directory.rglob("*")):
         if path.suffix not in (".csv", ".json", ".jsonl") or not path.is_file():
             continue
         raw = path.read_text(errors="replace")
